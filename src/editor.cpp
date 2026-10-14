@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 #include <imgui.h>
+#include <imgui_impl_sdlrenderer3.h>
+#include <imgui_internal.h>
 #include <stdexcept>
 #include <utility>
 namespace pf {
@@ -33,7 +35,9 @@ const char *tool_name(Tool t) {
   return "Tool";
 }
 } // namespace
-Editor::Editor(SDL_Renderer *renderer) : renderer_(renderer) {
+Editor::Editor(SDL_Renderer *renderer, float display_scale)
+    : renderer_(renderer), base_style_(ImGui::GetStyle()) {
+  set_display_scale(display_scale);
   std::filesystem::path default_path =
       std::filesystem::current_path() / "assets/studio_tiles.png";
   if (!std::filesystem::exists(default_path)) {
@@ -54,6 +58,73 @@ Editor::Editor(SDL_Renderer *renderer) : renderer_(renderer) {
   } catch (const std::exception &e) {
     status_ = e.what();
   }
+}
+void Editor::apply_ui_scale(int percent) {
+  static constexpr int presets[] = {100, 125, 150, 200};
+  const int *selected = std::min_element(
+      std::begin(presets), std::end(presets), [percent](int a, int b) {
+        return std::abs(a - percent) < std::abs(b - percent);
+      });
+  ui_scale_percent_ = *selected;
+  const float scale = static_cast<float>(ui_scale_percent_) / 100.0f;
+  ImGui::GetStyle() = base_style_;
+  ImGui::GetStyle().ScaleAllSizes(scale);
+  // Dear ImGui/SDL coordinates remain logical pixels; only font and style
+  // metrics scale, so canvas mouse-to-world calculations do not change.
+  auto &io = ImGui::GetIO();
+  ImGui_ImplSDLRenderer3_DestroyFontsTexture();
+  io.Fonts->Clear();
+  ImFontConfig font_config;
+  font_config.SizePixels = 16.0f * scale;
+  font_config.OversampleH = 2;
+  font_config.OversampleV = 1;
+  io.FontDefault = io.Fonts->AddFontDefault(&font_config);
+  if (!io.Fonts->Build() || !ImGui_ImplSDLRenderer3_CreateFontsTexture())
+    throw std::runtime_error("Cannot rebuild the scaled UI font atlas");
+  io.FontGlobalScale = 1.0f;
+}
+void Editor::set_display_scale(float scale) {
+  const int target = static_cast<int>(std::lround(
+      std::clamp(scale, 1.0f, 2.0f) * 100.0f));
+  apply_ui_scale(target);
+}
+void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
+  const ImGuiDockNode *existing = ImGui::DockBuilderGetNode(dockspace_id);
+  if (!force && existing &&
+      (existing->IsSplitNode() || existing->Windows.Size > 0))
+    return;
+
+  const ImGuiViewport *viewport = ImGui::GetMainViewport();
+  ImGui::DockBuilderRemoveNode(dockspace_id);
+  ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+  ImGui::DockBuilderSetNodePos(dockspace_id, viewport->WorkPos);
+  ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+  ImGuiID center = dockspace_id, left = 0, right = 0, bottom = 0, top = 0;
+  const float side_width = viewport->WorkSize.x < 1200.0f ? 0.24f : 0.21f;
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, side_width, &left,
+                              &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.25f, &right, &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,
+                              ui_scale_percent_ >= 150 ? 0.23f : 0.10f,
+                              &bottom, &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,
+                              ui_scale_percent_ >= 150 ? 0.25f : 0.12f,
+                              &top, &center);
+  ImGuiID layers = 0, entities = 0;
+  ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.48f, &entities,
+                              &layers);
+
+  ImGui::DockBuilderDockWindow("Toolbar", top);
+  ImGui::DockBuilderDockWindow("Tileset Palette", left);
+  ImGui::DockBuilderDockWindow("Layers", layers);
+  ImGui::DockBuilderDockWindow("Entities", entities);
+  ImGui::DockBuilderDockWindow("Level Canvas", center);
+  ImGui::DockBuilderDockWindow("Playtest", center);
+  ImGui::DockBuilderDockWindow("Status", bottom);
+  ImGui::DockBuilderFinish(dockspace_id);
+  reset_layout_requested_ = false;
+  focus_editor_canvas_ = true;
 }
 void Editor::set_active_layer(int index) {
   active_layer_ = std::clamp(
@@ -212,11 +283,8 @@ void Editor::toolbar() {
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
-      if (ImGui::MenuItem("Show grid", nullptr, &grid_visible_)) {
-      }
-      if (ImGui::MenuItem("Playtest collision debug", "F3",
-                          &debug_overlay_)) {
-      }
+      ImGui::MenuItem("Show grid", nullptr, &grid_visible_);
+      ImGui::MenuItem("Playtest collision debug", "F3", &debug_overlay_);
       if (ImGui::MenuItem("Fit level", "F"))
         fit_requested_ = true;
       if (ImGui::MenuItem("Reset zoom", "0")) {
@@ -224,27 +292,36 @@ void Editor::toolbar() {
         pan_x_ = 20;
         pan_y_ = 20;
       }
+      if (ImGui::BeginMenu("UI scale")) {
+        for (const int percent : {100, 125, 150, 200}) {
+          char label[16];
+          std::snprintf(label, sizeof(label), "%d%%", percent);
+          if (ImGui::MenuItem(label, nullptr, ui_scale_percent_ == percent))
+            apply_ui_scale(percent);
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::MenuItem("Reset workspace layout"))
+        reset_layout_requested_ = true;
       ImGui::EndMenu();
     }
     ImGui::EndMainMenuBar();
   }
-  ImGui::SetNextWindowPos(ImVec2(8, 28), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(1264, 52), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Toolbar")) {
     if (playtest_) {
-      ImGui::TextUnformatted("PLAYTEST");
-      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.96f, 1), "PLAYTEST");
+      ImGui::SameLine(0, 14);
       if (ImGui::Button(playtest_->paused() ? "Resume" : "Pause"))
         playtest_->set_paused(!playtest_->paused());
       ImGui::SameLine();
       if (ImGui::Button("Reset"))
         playtest_->reset();
       ImGui::SameLine();
-      if (ImGui::Button("Stop"))
+      if (ImGui::Button("Stop")) {
         playtest_.reset();
-      ImGui::SameLine();
-      ImGui::Text("%s", genre_name(document_.level().genre).c_str());
-      ImGui::SameLine();
+        focus_editor_canvas_ = true;
+      }
+      ImGui::SameLine(0, 14);
       ImGui::Checkbox("Debug overlay", &debug_overlay_);
     } else {
       if (ImGui::Button("Play")) {
@@ -263,47 +340,46 @@ void Editor::toolbar() {
           status_ = error.what();
         }
       }
-      ImGui::SameLine();
+      ImGui::SameLine(0, 10);
+      ImGui::BeginDisabled(!document_.can_undo());
       if (ImGui::Button("Undo"))
         document_.undo();
+      ImGui::EndDisabled();
       ImGui::SameLine();
+      ImGui::BeginDisabled(!document_.can_redo());
       if (ImGui::Button("Redo"))
         document_.redo();
+      ImGui::EndDisabled();
       ImGui::SameLine();
-      for (auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle, Tool::line,
-                        Tool::fill, Tool::eyedropper, Tool::collision,
-                        Tool::entity}) {
-        if (tool != Tool::pencil)
-          ImGui::SameLine();
-        if (tool_ == tool)
-          ImGui::PushStyleColor(
-              ImGuiCol_Button,
-              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (ImGui::Button(tool_name(tool)))
-          tool_ = tool;
-        if (tool_ == tool)
-          ImGui::PopStyleColor();
+      ImGui::TextUnformatted("Tool");
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(ImGui::GetWindowWidth() < 1100.0f ? 118.0f
+                                                               : 145.0f);
+      if (ImGui::BeginCombo("##active-tool", tool_name(tool_))) {
+        for (const auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle,
+                                Tool::line, Tool::fill, Tool::eyedropper,
+                                Tool::collision, Tool::entity}) {
+          const bool selected = tool == tool_;
+          if (ImGui::Selectable(tool_name(tool), selected))
+            tool_ = tool;
+          if (selected)
+            ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
       }
       ImGui::SameLine();
       ImGui::Checkbox("Grid", &grid_visible_);
       ImGui::SameLine();
+      ImGui::Checkbox("Collision", &collision_visible_);
+      ImGui::SameLine();
       if (ImGui::Button("Fit"))
         fit_requested_ = true;
       ImGui::SameLine();
-      if (ImGui::Button("100%")) {
+      if (ImGui::Button("Reset zoom")) {
         zoom_ = 1;
         pan_x_ = 20;
         pan_y_ = 20;
       }
-      ImGui::SameLine();
-      ImGui::Text("%s%s | %dx%d | %.0f%%",
-                  document_path_.empty()
-                      ? "Untitled"
-                      : document_path_.filename().string().c_str(),
-                  document_.dirty() ? " *" : "", document_.level().width,
-                  document_.level().height, zoom_ * 100.0f);
-      ImGui::SameLine();
-      ImGui::Checkbox("Collision", &collision_visible_);
     }
   }
   ImGui::End();
@@ -375,8 +451,6 @@ void Editor::toolbar() {
   }
 }
 void Editor::layers_panel() {
-  ImGui::SetNextWindowPos(ImVec2(1016, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(256, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Layers");
   if (ImGui::Button("+ Layer")) {
     try {
@@ -502,8 +576,6 @@ void Editor::sync_entity_fields() {
     entity_message_[0] = '\0';
 }
 void Editor::entity_inspector() {
-  ImGui::SetNextWindowPos(ImVec2(1016, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(256, 320), ImGuiCond_FirstUseEver);
   ImGui::Begin("Entities");
   const char *types =
       "Player spawn\0NPC\0Enemy\0Collectible\0Trigger\0Checkpoint\0Hazard\0";
@@ -563,11 +635,15 @@ void Editor::entity_inspector() {
 }
 void Editor::canvas() {
   if (playtest_) {
+    cursor_on_level_ = false;
+    ImGui::SetNextWindowFocus();
     playtest_canvas();
     return;
   }
-  ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
+  if (focus_editor_canvas_) {
+    ImGui::SetNextWindowFocus();
+    focus_editor_canvas_ = false;
+  }
   ImGui::Begin("Level Canvas");
   ImVec2 pos = ImGui::GetCursorScreenPos(),
          size = ImGui::GetContentRegionAvail();
@@ -645,6 +721,9 @@ void Editor::canvas() {
   auto [mx, my] = cursor_cell();
   const bool inside = mx >= 0 && my >= 0 && mx < document_.level().width &&
                       my < document_.level().height;
+  cursor_on_level_ = hovered && inside;
+  cursor_cell_x_ = cursor_on_level_ ? mx : -1;
+  cursor_cell_y_ = cursor_on_level_ ? my : -1;
   if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && inside) {
     if (tool_ == Tool::pencil || tool_ == Tool::eraser) {
       stroke_value_ = tool_ == Tool::eraser ? 0 : selected_tile_;
@@ -865,8 +944,6 @@ void Editor::canvas() {
   ImGui::End();
 }
 void Editor::playtest_canvas() {
-  ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Playtest");
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   ImVec2 size = ImGui::GetContentRegionAvail();
@@ -1008,14 +1085,10 @@ void Editor::playtest_canvas() {
   ImGui::End();
 }
 void Editor::draw() {
-  ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+  const ImGuiID dockspace_id =
+      ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+  set_default_layout(dockspace_id, reset_layout_requested_);
   toolbar();
-  if (playtest_) {
-    canvas();
-    return;
-  }
-  ImGui::SetNextWindowPos(ImVec2(8, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(262, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Tileset Palette");
   ImGui::Combo("New genre", &genre_, "Top-down RPG\0Platformer\0");
   ImGui::InputInt("New width", &width_);
@@ -1097,15 +1170,28 @@ void Editor::draw() {
   layers_panel();
   entity_inspector();
   canvas();
-  const ImVec2 vp = ImGui::GetMainViewport()->Pos,
-               vsz = ImGui::GetMainViewport()->Size;
-  ImGui::SetNextWindowPos(ImVec2(vp.x, vp.y + vsz.y - 26), ImGuiCond_Always);
-  ImGui::SetNextWindowSize(ImVec2(vsz.x, 26), ImGuiCond_Always);
   ImGui::Begin("Status", nullptr,
                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
-  ImGui::TextWrapped("%s | %s", document_.dirty() ? "Modified" : "Saved",
-                     status_.c_str());
+  char cursor[48];
+  if (cursor_on_level_)
+    std::snprintf(cursor, sizeof(cursor), "Cursor: %d, %d", cursor_cell_x_,
+                  cursor_cell_y_);
+  else
+    std::snprintf(cursor, sizeof(cursor), "Cursor: —");
+  ImGui::TextColored(document_.dirty() ? ImVec4(1.0f, 0.77f, 0.40f, 1.0f)
+                                      : ImVec4(0.82f, 0.88f, 0.94f, 1.0f),
+                     "%s%s  |  %s  |  %dx%d",
+                     document_path_.empty()
+                         ? "Untitled"
+                         : document_path_.filename().string().c_str(),
+                     document_.dirty() ? " *" : "",
+                     genre_name(document_.level().genre).c_str(),
+                     document_.level().width, document_.level().height);
+  ImGui::Text("Layer: %s  |  %s  |  Tool: %s  |  Zoom: %.0f%%  |  Status: %s",
+              document_.level().layers[static_cast<std::size_t>(active_layer_)]
+                  .name.c_str(),
+              cursor, tool_name(tool_), zoom_ * 100.0f, status_.c_str());
   ImGui::End();
 }
 } // namespace pf

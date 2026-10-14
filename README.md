@@ -102,4 +102,12 @@ The built-in playtest runs a renderer-independent copy of the current level at a
 
 ## Studio Alpha Phase 4
 
-Level saves now write to a temporary sibling file and atomically replace the destination after a successful write. Save As uses the Level JSON path field, and closing a modified document prompts to save, discard, or cancel. New/Open warn before discarding edits. A deterministic failed-replacement test verifies the destination remains intact and temporary files are cleaned up. Native OS file dialogs and portable Windows packaging remain deferred.
+Level saves now write to a temporary sibling file and atomically replace the destination after a successful write. Save As uses the Level JSON path field, and closing a modified document prompts to save, discard, or cancel. New/Open warn before discarding edits. A deterministic failed-replacement test verifies the destination remains intact and temporary files are cleaned up. Native OS file dialogs remain deferred; the portable Windows ZIP is available from GitHub Actions.
+
+## Studio Beta Phase 1
+
+Platformer rendering and collision use the same 0.62 × 0.78 tile-unit hitbox, and tile contacts resolve to exact surfaces. Platformer falls below the map now reach the respawn path while top-down map bounds remain solid. View → Playtest collision debug (or F3 while the playtest canvas is focused) shows collision cells, hitbox, player state, support/contact data, normals, and camera transform. See [Phase 1 physics notes](docs/studio-beta-phase1-physics.md).
+
+## Studio Beta Phase 2
+
+The editor now starts with a responsive docked workspace: tileset/tools on the left, canvas or playtest in the center, layers and entity properties on the right, and status at the bottom. Panels resize with the client viewport, the layout is stored in `imgui.ini`, and View → Reset workspace layout restores the default arrangement. View → UI scale selects 100%, 125%, 150%, or 200%; SDL display-scale changes update the generated Dear ImGui font atlas and widget metrics. Canvas coordinates remain in SDL/ImGui logical pixels. The toolbar groups play, undo/redo, active tool, grid/collision, and view controls. The status bar shows document, genre, layer, cursor tile, tool, zoom, and messages. A restrained dark palette supplies the application style.

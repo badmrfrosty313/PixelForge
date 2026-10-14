@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 #include <chrono>
 #include <filesystem>
+#include <imgui.h>
 #include <memory>
 namespace pf {
 enum class Tool {
@@ -23,6 +24,7 @@ class Editor {
   std::unique_ptr<gameplay::Session> playtest_;
   std::chrono::steady_clock::time_point last_playtest_frame_;
   SDL_Renderer *renderer_;
+  ImGuiStyle base_style_;
   std::filesystem::path document_path_;
   char path_[512] = "level.json";
   char tileset_path_[512] = "assets/studio_tiles.png";
@@ -31,6 +33,9 @@ class Editor {
       active_layer_ = 0, tile_width_ = 16, tile_height_ = 16;
   int level_tile_width_ = 24, level_tile_height_ = 24, entity_type_index_ = 1;
   float zoom_ = 1.0f, pan_x_ = 20, pan_y_ = 20;
+  int ui_scale_percent_ = 100;
+  int cursor_cell_x_ = -1, cursor_cell_y_ = -1;
+  bool cursor_on_level_ = false;
   bool grid_visible_ = true, stroke_active_ = false, gesture_active_ = false,
        fit_requested_ = false;
   bool collision_visible_ = false, collision_stroke_active_ = false,
@@ -48,6 +53,9 @@ class Editor {
   std::string status_ = "Ready";
   bool confirm_new_ = false, confirm_open_ = false, confirm_close_ = false;
   bool close_requested_ = false;
+  bool reset_layout_requested_ = false, focus_editor_canvas_ = false;
+  void apply_ui_scale(int percent);
+  void set_default_layout(ImGuiID dockspace_id, bool force);
   void toolbar();
   void layers_panel();
   void canvas();
@@ -62,7 +70,8 @@ class Editor {
   void mark_dirty_status();
 
 public:
-  explicit Editor(SDL_Renderer *renderer);
+  explicit Editor(SDL_Renderer *renderer, float display_scale = 1.0f);
+  void set_display_scale(float scale);
   bool assets_ready() const noexcept { return tileset_.loaded(); }
   void request_close();
   bool should_close() const noexcept { return close_requested_; }
