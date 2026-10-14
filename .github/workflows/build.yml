@@ -57,6 +57,7 @@ jobs:
           $required = @(
             "$package/PixelForge.exe",
             "$package/README.md",
+            "$package/LICENSE",
             "$package/THIRD_PARTY_NOTICES.md",
             "$package/assets/studio_tiles.png",
             "$package/assets/LICENSE.txt",
@@ -67,7 +68,7 @@ jobs:
             "$package/licenses/nlohmann-json-LICENSE.txt",
             "$package/licenses/stb-LICENSE.txt",
             "$package/docs/release-readiness.md",
-            "$package/docs/proposed-MIT-license.md",
+            "$package/docs/release-notes-v1.0.0.md",
             "$package/docs/release-notes-v1.0.0-rc2.md",
             "$package/docs/screenshots/rpg-editor.png",
             "$package/docs/screenshots/rpg-playtest.png",
@@ -79,7 +80,11 @@ jobs:
               throw "Portable package is missing $path"
             }
           }
-          $archive = "build/PixelForge-v1.0.0-rc2-windows-x64.zip"
+          $license = Get-Content "$package/LICENSE" -Raw
+          if ($license -notmatch "Copyright \(c\) 2026 badmrfrosty313" -or $license -notmatch "Permission is hereby granted") {
+            throw "Packaged PixelForge MIT license has an unexpected notice"
+          }
+          $archive = "build/PixelForge-v1.0.0-windows-x64.zip"
           Compress-Archive -Path "$package/*" -DestinationPath $archive -Force
           if ((Get-Item $archive).Length -eq 0) {
             throw "Portable package ZIP is empty"
@@ -112,16 +117,16 @@ jobs:
             Pop-Location
           }
           $hash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  PixelForge-v1.0.0-rc2-windows-x64.zip" | Set-Content -Path "${archive}.sha256" -Encoding ascii
+          "$hash  PixelForge-v1.0.0-windows-x64.zip" | Set-Content -Path "${archive}.sha256" -Encoding ascii
           Write-Output "Release candidate ZIP size: $((Get-Item $archive).Length) bytes"
           Write-Output "Release candidate ZIP SHA-256: $hash"
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
-          name: PixelForge-v1.0.0-rc2-windows-x64
+          name: PixelForge-v1.0.0-prepublish-windows-x64
           path: |
-            build/PixelForge-v1.0.0-rc2-windows-x64.zip
-            build/PixelForge-v1.0.0-rc2-windows-x64.zip.sha256
+            build/PixelForge-v1.0.0-windows-x64.zip
+            build/PixelForge-v1.0.0-windows-x64.zip.sha256
           retention-days: 14
 
   sanitizer:
