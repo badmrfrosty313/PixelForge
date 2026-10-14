@@ -46,6 +46,26 @@ jobs:
               throw "Portable package is missing $path"
             }
           }
+          $portable = Join-Path $env:RUNNER_TEMP "PixelForge-Portable-Verification"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          Copy-Item -Path "$package/*" -Destination $portable -Recurse -Force
+          Push-Location $env:RUNNER_TEMP
+          $previousVideoDriver = $env:SDL_VIDEODRIVER
+          try {
+            $env:SDL_VIDEODRIVER = "dummy"
+            & "$portable/PixelForge.exe" --smoke
+            if ($LASTEXITCODE -ne 0) {
+              throw "Portable PixelForge smoke test failed with exit code $LASTEXITCODE"
+            }
+          }
+          finally {
+            if ($null -eq $previousVideoDriver) {
+              Remove-Item Env:SDL_VIDEODRIVER -ErrorAction SilentlyContinue
+            } else {
+              $env:SDL_VIDEODRIVER = $previousVideoDriver
+            }
+            Pop-Location
+          }
           Compress-Archive -Path "$package/*" -DestinationPath "build/PixelForge-Windows.zip" -Force
           if ((Get-Item "build/PixelForge-Windows.zip").Length -eq 0) {
             throw "Portable package ZIP is empty"

@@ -24,11 +24,11 @@ ctest --test-dir build --output-on-failure
 ./build/PixelForge
 ```
 
-On a displayless Linux host add `-DSDL_UNIX_CONSOLE_BUILD=ON` at configure; this permits an SDL build without desktop libraries. `SDL_VIDEODRIVER=dummy ./build/PixelForge --smoke` renders three frames using the real SDL/ImGui backends and exits. It does not validate interactive desktop behavior. Core-only development: configure with `-DPIXELFORGE_EDITOR=OFF`.
+On a displayless Linux host add `-DSDL_UNIX_CONSOLE_BUILD=ON` at configure; this permits an SDL build without desktop libraries. `SDL_VIDEODRIVER=dummy ./build/PixelForge --smoke` draws the welcome screen, loads both examples, exercises repeated playtest start/stop, resizes the window, and exits after four frames. It does not validate interactive desktop behavior or Windows dialogs. Core-only development: configure with `-DPIXELFORGE_EDITOR=OFF`.
 
 ## Windows package
 
-Download the `PixelForge-Windows` artifact from a successful GitHub Actions run and unzip it. Run `PixelForge.exe` from the package directory. The package contains `assets/studio_tiles.png`, both example levels, this README, and the license texts for the statically linked dependencies. The executable uses the statically linked MSVC runtime and SDL; no separate SDL or Visual C++ runtime installation is expected.
+Download the `PixelForge-Windows` artifact from a successful GitHub Actions run and unzip it. Run `PixelForge.exe` from the package directory. The package contains `assets/studio_tiles.png`, both example levels, this README, and the license texts for the statically linked dependencies. CI copies the package to a temporary folder and starts its executable from a different working directory to verify that bundled assets resolve beside the executable. The executable uses the statically linked MSVC runtime and SDL; no separate SDL or Visual C++ runtime installation is expected.
 
 ## Editing
 
@@ -38,7 +38,7 @@ Use File → Open, Save, or Save As to work with JSON levels through the native 
 
 The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level. The Entity tool places and moves entities; the Entities panel edits type, position, name/message properties, and deletion. The Collision tool paints an independent solid grid with an optional overlay.
 
-Click **Play** to run an isolated copy of the current level. Click the canvas to focus controls. Arrows or WASD move; Space or Up jumps in the platformer; E interacts with nearby RPG NPCs. Pause, Reset, and Stop are in the toolbar. Runtime collection, movement, and checkpoints do not modify the editor document. F3 or View → Playtest collision debug toggles collision-tile and player-hitbox outlines plus position, velocity, grounded state, support/contact information, camera position, and scale. Ctrl+S saves, Ctrl+Shift+S saves to the path in the Level JSON field, and Ctrl+O/Ctrl+N prompt before discarding unsaved edits.
+Click **Play** to run an isolated copy of the current level. Click the canvas to focus controls. Arrows or WASD move; Space or Up jumps in the platformer; E interacts with nearby RPG NPCs. Pause, Reset, and Stop are in the toolbar. Runtime collection, movement, and checkpoints do not modify the editor document. F3 or View → Playtest collision debug toggles collision-tile and player-hitbox outlines plus position, velocity, grounded state, support/contact information, camera position, and scale. Ctrl+S saves, Ctrl+Shift+S opens Save As, Ctrl+O opens a level, and Ctrl+N starts a new level; dirty documents receive save/discard/cancel prompts.
 
 ## Architecture
 
@@ -60,6 +60,8 @@ Model tests cover geometry and collision bounds, v1 migration, v2 round-trips fo
 Use CTest as above. The automated test programs currently report 81 model/serialization checks, 62 document/undo checks, and 74 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify native open/save/import dialogs, entity/collision editing, and both example playtests; the headless smoke test cannot prove Windows dialog behavior or interactive visual quality.
 
 Genuine application screenshots are not included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, character animation is a small procedural two-frame treatment, and audio is absent. Interactive desktop behavior and Windows runtime still require manual verification.
+
+The included atlas is original and CC0 (`assets/LICENSE.txt`), and `THIRD_PARTY_NOTICES.md` records the bundled dependency licenses. The repository does not currently declare a project-wide license; selecting one is left to the maintainers.
 
 ## Studio Alpha Phase 1
 
@@ -127,3 +129,7 @@ Playtest characters are now drawn as an original pixel-style explorer fitted to 
 ## Studio Beta Phase 6
 
 Successful document replacement and New now stop an active playtest, while failed loads preserve both the current document and play session. The smoke workflow exercises startup, RPG and platformer demo loading, repeated playtest start/stop, and the sprite/entity drawing path at several window sizes and scales. Missing relative assets have a model regression test. The three core suites pass ASan/UBSan with leak detection on Linux; see [Phase 6 hardening notes](docs/studio-beta-phase6-hardening.md).
+
+## Studio Beta Phase 7
+
+The Windows workflow packages the static executable, examples, tileset, README, notices, and pinned dependency licenses. It launches the copied package from a separate temporary directory using the package executable's own path for resources, then creates the `PixelForge-Windows` ZIP. See [portfolio summary](docs/portfolio.md). Real application screenshots and interactive Windows acceptance remain manual release tasks.
