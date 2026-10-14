@@ -1,9 +1,29 @@
 #include "tileset.hpp"
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 namespace pf {
+namespace {
+struct FileCloser {
+  void operator()(std::FILE *file) const noexcept {
+    if (file)
+      std::fclose(file);
+  }
+};
+std::FILE *open_image_file(const std::filesystem::path &path) {
+#ifdef _WIN32
+  return _wfopen(path.c_str(), L"rb");
+#else
+  return std::fopen(path.c_str(), "rb");
+#endif
+}
+std::string path_for_error(const std::filesystem::path &path) {
+  const auto encoded = path.u8string();
+  return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
+}
+} // namespace
 void Tileset::TextureDeleter::operator()(SDL_Texture *t) const noexcept {
   if (t)
     SDL_DestroyTexture(t);
@@ -16,8 +36,11 @@ void Tileset::load(SDL_Renderer *renderer, const std::filesystem::path &path,
       tile_height > 512)
     throw std::invalid_argument("Tile dimensions must be 1..512 pixels");
   int w = 0, h = 0, channels = 0;
-  const auto file = path.string();
-  if (!stbi_info(file.c_str(), &w, &h, &channels))
+  const auto file = path_for_error(path);
+  std::unique_ptr<std::FILE, FileCloser> input(open_image_file(path));
+  if (!input)
+    throw std::runtime_error("Cannot open tileset PNG '" + file + "'");
+  if (!stbi_info_from_file(input.get(), &w, &h, &channels))
     throw std::runtime_error("Cannot read tileset PNG '" + file + "': " +
                              (stbi_failure_reason() ? stbi_failure_reason()
                                                     : "invalid image header"));
@@ -26,7 +49,9 @@ void Tileset::load(SDL_Renderer *renderer, const std::filesystem::path &path,
           16 * 1024 * 1024)
     throw std::runtime_error(
         "Tileset image exceeds the 8192-pixel / 16-megapixel limit");
-  stbi_uc *decoded = stbi_load(file.c_str(), &w, &h, &channels, STBI_rgb_alpha);
+  std::rewind(input.get());
+  stbi_uc *decoded =
+      stbi_load_from_file(input.get(), &w, &h, &channels, STBI_rgb_alpha);
   if (!decoded)
     throw std::runtime_error(
         "Cannot load tileset '" + file + "': " +

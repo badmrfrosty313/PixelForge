@@ -34,7 +34,7 @@ Download the `PixelForge-Windows` artifact from a successful GitHub Actions run 
 
 The editor creates maps from 1–256 cells per dimension with either `top_down_rpg` or `platformer` genre. The original procedural pixel-art PNG atlas is loaded from `assets/studio_tiles.png`; the palette lets you load another PNG and set its tile width/height. Select a palette tile and use Pencil to paint. The toolbar also provides Eraser, Rectangle, Line, Flood Fill, and Eyedropper. Pencil drag fills every crossed cell and is one undoable action. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. Grid visibility, Fit, and 100% reset are available in the toolbar. Middle-drag pans; the wheel zooms around the cursor. Panels can be docked by dragging their title bars. Layout persists in imgui.ini in the working directory.
 
-Enter a JSON path in the Tileset Palette panel and click Open or Save. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading, creating, and closing with unsaved edits offer save/discard/cancel choices as appropriate. Saves use a same-directory temporary file and replace the destination only after writing succeeds. Native file dialogs are planned for Studio Beta.
+Use File → Open, Save, or Save As to work with JSON levels through the native platform file picker. File → Import PNG tileset selects an image without typing a path. Bundled assets resolve from the executable folder (with a source-tree fallback for development); level assets resolve beside the JSON first. Saving packages a selected tileset beside the level and atomically replaces the JSON file. Open, New, and Exit protect dirty documents with save/discard/cancel prompts. File and asset failures appear in a modal with a clear error message. Ctrl+S saves, Ctrl+Shift+S opens Save As, and Ctrl+O opens the picker.
 
 The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level. The Entity tool places and moves entities; the Entities panel edits type, position, name/message properties, and deletion. The Collision tool paints an independent solid grid with an optional overlay.
 
@@ -57,9 +57,9 @@ Model tests cover geometry and collision bounds, v1 migration, v2 round-trips fo
 
 ## Validation and limitations
 
-Use CTest as above. The automated test programs currently report 70 model/serialization checks, 62 document/undo checks, and 72 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify entity/collision editing and run both example playtests; graphical desktop controls and visual quality are not proven by the headless smoke test.
+Use CTest as above. The automated test programs currently report 80 model/serialization checks, 62 document/undo checks, and 72 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify native open/save/import dialogs, entity/collision editing, and both example playtests; the headless smoke test cannot prove Windows dialog behavior or interactive visual quality.
 
-Native file dialogs and genuine application screenshots are not included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
+Genuine application screenshots are not included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
 
 ## Studio Alpha Phase 1
 

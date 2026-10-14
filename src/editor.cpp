@@ -1,4 +1,5 @@
 #include "editor.hpp"
+#include "asset_paths.hpp"
 #include "coordinates.hpp"
 #include "rendering.hpp"
 #include "serialization.hpp"
@@ -9,10 +10,58 @@
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer3.h>
 #include <imgui_internal.h>
+#include <SDL3/SDL_dialog.h>
+#include <cctype>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 namespace pf {
+struct DialogMailbox {
+  struct Result {
+    int action = 0;
+    std::filesystem::path path;
+    std::string error;
+    bool canceled = false;
+  };
+  std::mutex mutex;
+  std::optional<Result> result;
+};
 namespace {
+std::string path_text(const std::filesystem::path &path) {
+  const auto encoded = path.u8string();
+  return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
+}
+enum class DialogAction : int { open_level, save_level, import_tileset };
+struct DialogTicket {
+  std::weak_ptr<DialogMailbox> mailbox;
+  DialogAction action;
+};
+const SDL_DialogFileFilter level_filter[] = {{"PixelForge levels", "json"}};
+const SDL_DialogFileFilter tileset_filter[] = {{"PNG image", "png"}};
+
+void SDLCALL file_dialog_callback(void *userdata,
+                                  const char *const *filelist, int) {
+  std::unique_ptr<DialogTicket> ticket(
+      static_cast<DialogTicket *>(userdata));
+  auto mailbox = ticket->mailbox.lock();
+  if (!mailbox)
+    return;
+  DialogMailbox::Result result;
+  result.action = static_cast<int>(ticket->action);
+  if (!filelist)
+    result.error = SDL_GetError();
+  else if (!filelist[0])
+    result.canceled = true;
+  else {
+    const auto *begin = reinterpret_cast<const char8_t *>(filelist[0]);
+    result.path = std::filesystem::path(
+        std::u8string(begin, begin + std::strlen(filelist[0])));
+  }
+  std::lock_guard lock(mailbox->mutex);
+  mailbox->result = std::move(result);
+}
+
 const char *tool_name(Tool t) {
   switch (t) {
   case Tool::pencil:
@@ -36,22 +85,18 @@ const char *tool_name(Tool t) {
 }
 } // namespace
 Editor::Editor(SDL_Renderer *renderer, float display_scale)
-    : renderer_(renderer), base_style_(ImGui::GetStyle()) {
+    : renderer_(renderer), base_style_(ImGui::GetStyle()),
+      dialog_mailbox_(std::make_shared<DialogMailbox>()) {
   set_display_scale(display_scale);
-  std::filesystem::path default_path =
-      std::filesystem::current_path() / "assets/studio_tiles.png";
-  if (!std::filesystem::exists(default_path)) {
-    const char *executable_base = SDL_GetBasePath();
-    if (executable_base && *executable_base) {
-      const auto executable_path =
-          std::filesystem::path(executable_base) / "assets/studio_tiles.png";
-      if (std::filesystem::exists(executable_path))
-        default_path = executable_path;
-    }
-    if (!std::filesystem::exists(default_path))
-      default_path = std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR) /
-                     "studio_tiles.png";
-  }
+  const char *executable_base = SDL_GetBasePath();
+  if (executable_base && *executable_base &&
+      std::filesystem::exists(std::filesystem::path(executable_base) /
+                              "assets/studio_tiles.png"))
+    resource_root_ = std::filesystem::path(executable_base);
+  else
+    resource_root_ =
+        std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR).parent_path();
+  const auto default_path = resource_root_ / "assets/studio_tiles.png";
   try {
     tileset_.load(renderer_, default_path, tile_width_, tile_height_);
     status_ = "Loaded original Studio tileset";
@@ -126,6 +171,101 @@ void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
   reset_layout_requested_ = false;
   focus_editor_canvas_ = true;
 }
+void Editor::request_open_dialog() {
+  if (dialog_pending_)
+    return;
+  auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::open_level};
+  dialog_pending_ = true;
+  SDL_ShowOpenFileDialog(file_dialog_callback, ticket,
+                         SDL_GetRenderWindow(renderer_),
+                         level_filter, 1, nullptr, false);
+}
+void Editor::request_save_dialog(SaveIntent intent) {
+  if (dialog_pending_)
+    return;
+  save_intent_ = intent;
+  auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::save_level};
+  dialog_pending_ = true;
+  SDL_ShowSaveFileDialog(file_dialog_callback, ticket,
+                         SDL_GetRenderWindow(renderer_),
+                         level_filter, 1, nullptr);
+}
+void Editor::request_tileset_dialog() {
+  if (dialog_pending_)
+    return;
+  auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::import_tileset};
+  dialog_pending_ = true;
+  SDL_ShowOpenFileDialog(file_dialog_callback, ticket,
+                         SDL_GetRenderWindow(renderer_),
+                         tileset_filter, 1, nullptr, false);
+}
+void Editor::report_error(const std::string &message) {
+  status_ = message;
+  error_message_ = message;
+  error_popup_pending_ = true;
+}
+void Editor::poll_dialog_result() {
+  std::optional<DialogMailbox::Result> result;
+  {
+    std::lock_guard lock(dialog_mailbox_->mutex);
+    if (!dialog_mailbox_->result)
+      return;
+    result = std::move(dialog_mailbox_->result);
+    dialog_mailbox_->result.reset();
+  }
+  dialog_pending_ = false;
+  if (!result->error.empty()) {
+    save_intent_ = SaveIntent::none;
+    report_error("File dialog failed: " + result->error);
+    return;
+  }
+  if (result->canceled) {
+    if (save_intent_ == SaveIntent::open_level)
+      pending_open_path_.clear();
+    save_intent_ = SaveIntent::none;
+    status_ = "File selection canceled";
+    return;
+  }
+  const auto selected = std::filesystem::absolute(result->path).lexically_normal();
+  const auto action = static_cast<DialogAction>(result->action);
+  if (action == DialogAction::open_level) {
+    pending_open_path_ = selected;
+    if (document_.dirty())
+      confirm_open_ = true;
+    else
+      open_path(selected);
+  } else if (action == DialogAction::import_tileset) {
+    import_tileset(selected);
+  } else {
+    auto target = selected;
+    if (target.extension().empty())
+      target += ".json";
+    auto extension = target.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (extension != ".json") {
+      save_intent_ = SaveIntent::none;
+      report_error("PixelForge levels must use the .json extension");
+      return;
+    }
+    const auto intent = save_intent_;
+    save_intent_ = SaveIntent::none;
+    if (save_level_to(target)) {
+      if (intent == SaveIntent::create_new) {
+        new_level();
+        close_new_popup_ = true;
+      } else if (intent == SaveIntent::open_level) {
+        open_path(pending_open_path_);
+        pending_open_path_.clear();
+        close_open_popup_ = true;
+      } else if (intent == SaveIntent::close_application) {
+        close_requested_ = true;
+      }
+    }
+  }
+}
 void Editor::set_active_layer(int index) {
   active_layer_ = std::clamp(
       index, 0, static_cast<int>(document_.level().layers.size()) - 1);
@@ -135,36 +275,69 @@ void Editor::mark_dirty_status() {
     status_ = "Modified";
 }
 bool Editor::save_level() {
+  if (document_path_.empty()) {
+    request_save_dialog();
+    return false;
+  }
+  return save_level_to(document_path_);
+}
+bool Editor::save_level_to(const std::filesystem::path &path) {
   try {
-    const auto target =
-        document_path_.empty() ? std::filesystem::path(path_) : document_path_;
+    if (path.empty())
+      throw std::invalid_argument("Level path cannot be empty");
+    const auto target = std::filesystem::absolute(path).lexically_normal();
     if (target.empty())
       throw std::invalid_argument("Level path cannot be empty");
+    const auto source = pending_tileset_source_.empty() ? tileset_.path()
+                                                        : pending_tileset_source_;
+    const auto reference = ensure_document_asset(
+        source, target, document_.level().tileset_path);
+    if (reference != document_.level().tileset_path) {
+      document_.set_asset_settings(reference, level_tile_width_,
+                                   level_tile_height_, tile_width_,
+                                   tile_height_);
+      std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                    reference.c_str());
+    }
     save(document_.level(), target);
     document_path_ = target;
-    const auto text = target.string();
-    std::snprintf(path_, sizeof(path_), "%s", text.c_str());
     document_.mark_saved();
     status_ = "Saved";
     return true;
   } catch (const std::exception &e) {
-    status_ = e.what();
+    report_error(e.what());
     return false;
   }
 }
-bool Editor::save_level_as() {
+void Editor::import_tileset(const std::filesystem::path &path) {
   try {
-    const std::filesystem::path target(path_);
-    if (target.empty())
-      throw std::invalid_argument("Level path cannot be empty");
-    save(document_.level(), target);
-    document_path_ = target;
-    document_.mark_saved();
-    status_ = "Saved as " + target.string();
-    return true;
+    const auto extension = path.extension().string();
+    if (extension.size() != 4 || extension[0] != '.' ||
+        std::tolower(static_cast<unsigned char>(extension[1])) != 'p' ||
+        std::tolower(static_cast<unsigned char>(extension[2])) != 'n' ||
+        std::tolower(static_cast<unsigned char>(extension[3])) != 'g')
+      throw std::invalid_argument("Choose a PNG tileset image");
+    const auto source = std::filesystem::absolute(path).lexically_normal();
+    tileset_.load(renderer_, source, tile_width_, tile_height_);
+    auto stem = path_text(source.stem());
+    for (auto &character : stem)
+      if (!std::isalnum(static_cast<unsigned char>(character)) &&
+          character != '-' && character != '_')
+        character = '_';
+    if (stem.empty() || stem == "." || stem == "..")
+      stem = "imported-tileset";
+    const auto reference = "assets/" + stem + ".png";
+    document_.set_asset_settings(reference, level_tile_width_,
+                                 level_tile_height_, tile_width_,
+                                 tile_height_);
+    pending_tileset_source_ = source;
+    std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                  reference.c_str());
+    selected_tile_ = 1;
+    mark_dirty_status();
+    status_ = "Imported tileset; it will be copied beside the level on save";
   } catch (const std::exception &e) {
-    status_ = e.what();
-    return false;
+    report_error(e.what());
   }
 }
 void Editor::request_close() {
@@ -173,58 +346,35 @@ void Editor::request_close() {
   else
     close_requested_ = true;
 }
-void Editor::open_path() {
+void Editor::open_path(const std::filesystem::path &path) {
   try {
     if (stroke_active_) {
       document_.end_stroke();
       stroke_active_ = false;
     }
-    auto loaded = load(path_);
-    std::string asset_warning;
-    std::vector<std::filesystem::path> asset_candidates{
-        std::filesystem::current_path() / loaded.tileset_path};
-    if (const char *executable_base = SDL_GetBasePath();
-        executable_base && *executable_base)
-      asset_candidates.emplace_back(std::filesystem::path(executable_base) /
-                                    loaded.tileset_path);
-    asset_candidates.emplace_back(
-        std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR).parent_path() /
-        loaded.tileset_path);
-    std::exception_ptr asset_error;
-    for (const auto &asset_path : asset_candidates) {
-      try {
-        tileset_.load(renderer_, asset_path, loaded.atlas_tile_width,
-                      loaded.atlas_tile_height);
-        asset_error = nullptr;
-        break;
-      } catch (...) {
-        asset_error = std::current_exception();
-      }
-    }
-    if (asset_error) {
-      try {
-        std::rethrow_exception(asset_error);
-      } catch (const std::exception &error) {
-        asset_warning = std::string("; tileset unavailable: ") + error.what();
-      }
-    } else {
-      std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
-                    loaded.tileset_path.c_str());
-      tile_width_ = loaded.atlas_tile_width;
-      tile_height_ = loaded.atlas_tile_height;
-    }
+    const auto target = std::filesystem::absolute(path).lexically_normal();
+    auto loaded = load(target);
+    const auto asset_path =
+        resolve_asset_path(loaded.tileset_path, target, resource_root_);
+    tileset_.load(renderer_, asset_path, loaded.atlas_tile_width,
+                  loaded.atlas_tile_height);
+    std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                  loaded.tileset_path.c_str());
+    tile_width_ = loaded.atlas_tile_width;
+    tile_height_ = loaded.atlas_tile_height;
     document_ = Document(std::move(loaded));
     document_.mark_saved();
-    document_path_ = path_;
+    document_path_ = target;
+    pending_tileset_source_.clear();
     genre_ = document_.level().genre == Genre::top_down_rpg ? 0 : 1;
     width_ = document_.level().width;
     height_ = document_.level().height;
     level_tile_width_ = document_.level().tile_width;
     level_tile_height_ = document_.level().tile_height;
     set_active_layer(0);
-    status_ = "Opened level" + asset_warning;
+    status_ = "Opened " + path_text(target.filename());
   } catch (const std::exception &e) {
-    status_ = e.what();
+    report_error(e.what());
   }
 }
 void Editor::new_level() {
@@ -243,7 +393,6 @@ void Editor::new_level() {
     level.validate();
     document_ = Document(std::move(level));
     document_path_.clear();
-    std::snprintf(path_, sizeof(path_), "level.json");
     set_active_layer(0);
     status_ = "Created new level";
     selected_entity_id_ = 0;
@@ -260,16 +409,16 @@ void Editor::toolbar() {
         else
           new_level();
       }
-      if (ImGui::MenuItem("Open...", "Ctrl+O")) {
-        if (document_.dirty())
-          confirm_open_ = true;
-        else
-          open_path();
-      }
-      if (ImGui::MenuItem("Save", "Ctrl+S"))
+      if (ImGui::MenuItem("Open...", "Ctrl+O", false, !dialog_pending_))
+        request_open_dialog();
+      if (ImGui::MenuItem("Save", "Ctrl+S", false, !dialog_pending_))
         save_level();
-      if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S"))
-        save_level_as();
+      if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S", false,
+                          !dialog_pending_))
+        request_save_dialog();
+      if (ImGui::MenuItem("Import PNG tileset...", nullptr, false,
+                          !dialog_pending_))
+        request_tileset_dialog();
       ImGui::Separator();
       if (ImGui::MenuItem("Exit"))
         request_close();
@@ -390,8 +539,14 @@ void Editor::toolbar() {
   if (ImGui::BeginPopupModal("Discard edits before New?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
+    if (close_new_popup_) {
+      close_new_popup_ = false;
+      ImGui::CloseCurrentPopup();
+    }
     if (ImGui::Button("Save and create")) {
-      if (save_level()) {
+      if (document_path_.empty())
+        request_save_dialog(SaveIntent::create_new);
+      else if (save_level()) {
         new_level();
         ImGui::CloseCurrentPopup();
       }
@@ -413,13 +568,30 @@ void Editor::toolbar() {
   if (ImGui::BeginPopupModal("Discard edits before Open?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
+    if (close_open_popup_) {
+      close_open_popup_ = false;
+      ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("Save and open")) {
+      if (document_path_.empty())
+        request_save_dialog(SaveIntent::open_level);
+      else if (save_level()) {
+        open_path(pending_open_path_);
+        pending_open_path_.clear();
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Discard and open")) {
-      open_path();
+      open_path(pending_open_path_);
+      pending_open_path_.clear();
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel"))
+    if (ImGui::Button("Cancel")) {
+      pending_open_path_.clear();
       ImGui::CloseCurrentPopup();
+    }
     ImGui::EndPopup();
   }
   if (confirm_close_) {
@@ -430,7 +602,9 @@ void Editor::toolbar() {
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
     if (ImGui::Button("Save and exit")) {
-      if (save_level()) {
+      if (document_path_.empty())
+        request_save_dialog(SaveIntent::close_application);
+      else if (save_level()) {
         close_requested_ = true;
         confirm_close_ = false;
         ImGui::CloseCurrentPopup();
@@ -675,7 +849,7 @@ void Editor::canvas() {
   }
   if (focused && ImGui::IsKeyPressed(ImGuiKey_S) && io.KeyCtrl) {
     if (io.KeyShift)
-      save_level_as();
+      request_save_dialog();
     else
       save_level();
   }
@@ -685,12 +859,8 @@ void Editor::canvas() {
     else
       new_level();
   }
-  if (focused && ImGui::IsKeyPressed(ImGuiKey_O) && io.KeyCtrl) {
-    if (document_.dirty())
-      confirm_open_ = true;
-    else
-      open_path();
-  }
+  if (focused && ImGui::IsKeyPressed(ImGuiKey_O) && io.KeyCtrl)
+    request_open_dialog();
   if (focused && ImGui::IsKeyPressed(ImGuiKey_F))
     fit_requested_ = true;
   if (focused && ImGui::IsKeyPressed(ImGuiKey_0)) {
@@ -1085,6 +1255,7 @@ void Editor::playtest_canvas() {
   ImGui::End();
 }
 void Editor::draw() {
+  poll_dialog_result();
   const ImGuiID dockspace_id =
       ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
   set_default_layout(dockspace_id, reset_layout_requested_);
@@ -1101,41 +1272,28 @@ void Editor::draw() {
     else
       new_level();
   }
-  ImGui::InputText("Level JSON", path_, sizeof(path_));
-  ImGui::SameLine();
-  if (ImGui::Button("Open")) {
-    if (document_.dirty())
-      confirm_open_ = true;
-    else
-      open_path();
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Save"))
-    save_level();
-  ImGui::SameLine();
-  if (ImGui::Button("Save As"))
-    save_level_as();
   ImGui::Separator();
-  ImGui::InputText("PNG path", tileset_path_, sizeof(tileset_path_));
   ImGui::InputInt("Tile width", &tile_width_);
   ImGui::InputInt("Tile height", &tile_height_);
-  if (ImGui::Button("Load PNG")) {
+  if (ImGui::Button("Import PNG..."))
+    request_tileset_dialog();
+  ImGui::TextWrapped("Atlas: %s", tileset_path_);
+  if (ImGui::Button("Load current atlas settings")) {
     try {
       Level settings = document_.level();
-      settings.tileset_path = tileset_path_;
       settings.tile_width = level_tile_width_;
       settings.tile_height = level_tile_height_;
       settings.atlas_tile_width = tile_width_;
       settings.atlas_tile_height = tile_height_;
       settings.validate();
-      tileset_.load(renderer_, tileset_path_, tile_width_, tile_height_);
+      tileset_.load(renderer_, tileset_.path(), tile_width_, tile_height_);
       document_.set_asset_settings(tileset_path_, level_tile_width_,
                                    level_tile_height_, tile_width_,
                                    tile_height_);
       selected_tile_ = 1;
       status_ = "Loaded PNG tileset";
     } catch (const std::exception &e) {
-      status_ = e.what();
+      report_error(e.what());
     }
   }
   ImGui::Text("%s", tileset_.loaded() ? "PNG atlas ready" : "No atlas loaded");
@@ -1184,7 +1342,7 @@ void Editor::draw() {
                      "%s%s  |  %s  |  %dx%d",
                      document_path_.empty()
                          ? "Untitled"
-                         : document_path_.filename().string().c_str(),
+                         : path_text(document_path_.filename()).c_str(),
                      document_.dirty() ? " *" : "",
                      genre_name(document_.level().genre).c_str(),
                      document_.level().width, document_.level().height);
@@ -1193,5 +1351,18 @@ void Editor::draw() {
                   .name.c_str(),
               cursor, tool_name(tool_), zoom_ * 100.0f, status_.c_str());
   ImGui::End();
+  if (error_popup_pending_) {
+    ImGui::OpenPopup("File operation failed");
+    error_popup_pending_ = false;
+  }
+  if (ImGui::BeginPopupModal("File operation failed", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("%s", error_message_.c_str());
+    if (ImGui::Button("OK")) {
+      error_message_.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
 }
 } // namespace pf

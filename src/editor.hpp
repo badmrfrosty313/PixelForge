@@ -8,6 +8,7 @@
 #include <imgui.h>
 #include <memory>
 namespace pf {
+struct DialogMailbox;
 enum class Tool {
   pencil,
   eraser,
@@ -26,7 +27,8 @@ class Editor {
   SDL_Renderer *renderer_;
   ImGuiStyle base_style_;
   std::filesystem::path document_path_;
-  char path_[512] = "level.json";
+  std::filesystem::path resource_root_;
+  std::filesystem::path pending_open_path_, pending_tileset_source_;
   char tileset_path_[512] = "assets/studio_tiles.png";
   char layer_name_[128] = "Layer";
   int genre_ = 0, width_ = 32, height_ = 24, selected_tile_ = 1,
@@ -51,11 +53,22 @@ class Editor {
   int gesture_value_ = 1;
   Tool tool_ = Tool::pencil;
   std::string status_ = "Ready";
+  std::string error_message_;
+  std::shared_ptr<DialogMailbox> dialog_mailbox_;
+  enum class SaveIntent { none, open_level, create_new, close_application };
+  SaveIntent save_intent_ = SaveIntent::none;
+  bool dialog_pending_ = false, close_new_popup_ = false,
+       close_open_popup_ = false;
+  bool error_popup_pending_ = false;
   bool confirm_new_ = false, confirm_open_ = false, confirm_close_ = false;
   bool close_requested_ = false;
   bool reset_layout_requested_ = false, focus_editor_canvas_ = false;
   void apply_ui_scale(int percent);
   void set_default_layout(ImGuiID dockspace_id, bool force);
+  void request_open_dialog();
+  void request_save_dialog(SaveIntent intent = SaveIntent::none);
+  void request_tileset_dialog();
+  void poll_dialog_result();
   void toolbar();
   void layers_panel();
   void canvas();
@@ -63,10 +76,12 @@ class Editor {
   void entity_inspector();
   void sync_entity_fields();
   void set_active_layer(int index);
-  void open_path();
+  void open_path(const std::filesystem::path &path);
+  void import_tileset(const std::filesystem::path &path);
   void new_level();
   bool save_level();
-  bool save_level_as();
+  bool save_level_to(const std::filesystem::path &path);
+  void report_error(const std::string &message);
   void mark_dirty_status();
 
 public:
