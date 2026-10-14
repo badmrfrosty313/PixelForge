@@ -69,7 +69,6 @@ jobs:
             "$package/licenses/stb-LICENSE.txt",
             "$package/docs/release-readiness.md",
             "$package/docs/release-notes-v1.0.0.md",
-            "$package/docs/release-notes-v1.0.0-rc2.md",
             "$package/docs/screenshots/rpg-editor.png",
             "$package/docs/screenshots/rpg-playtest.png",
             "$package/docs/screenshots/platformer-editor.png",
