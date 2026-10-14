@@ -102,7 +102,7 @@ The built-in playtest runs a renderer-independent copy of the current level at a
 
 ## Studio Alpha Phase 4
 
-Level saves now write to a temporary sibling file and atomically replace the destination after a successful write. Save As uses the Level JSON path field, and closing a modified document prompts to save, discard, or cancel. New/Open warn before discarding edits. A deterministic failed-replacement test verifies the destination remains intact and temporary files are cleaned up. Native OS file dialogs remain deferred; the portable Windows ZIP is available from GitHub Actions.
+Level saves use a temporary sibling file and atomically replace the destination after a successful write. The original Alpha path-entry workflow has been replaced in Studio Beta by native SDL3 dialogs; see Phase 3 below. The portable Windows ZIP is available from GitHub Actions.
 
 ## Studio Beta Phase 1
 
@@ -111,3 +111,11 @@ Platformer rendering and collision use the same 0.62 × 0.78 tile-unit hitbox, a
 ## Studio Beta Phase 2
 
 The editor now starts with a responsive docked workspace: tileset/tools on the left, canvas or playtest in the center, layers and entity properties on the right, and status at the bottom. Panels resize with the client viewport, the layout is stored in `imgui.ini`, and View → Reset workspace layout restores the default arrangement. View → UI scale selects 100%, 125%, 150%, or 200%; SDL display-scale changes update the generated Dear ImGui font atlas and widget metrics. Canvas coordinates remain in SDL/ImGui logical pixels. The toolbar groups play, undo/redo, active tool, grid/collision, and view controls. The status bar shows document, genre, layer, cursor tile, tool, zoom, and messages. A restrained dark palette supplies the application style.
+
+## Studio Beta Phase 3
+
+File → Open/Save As and PNG import use SDL3 native dialogs. Bundled resources resolve relative to the executable, and document assets resolve beside the level before the explicit resource root. Save packages the selected atlas next to the JSON document and retains atomic JSON replacement. Safe relative asset references reject POSIX roots, Windows drive/UNC roots, and traversal. See [Phase 3 file-operation notes](docs/studio-beta-phase3-files.md).
+
+## Studio Beta Phase 4
+
+First launch opens a dismissible welcome workspace with genre-specific New actions, Open, one-click RPG and platformer demos, and concise controls/objectives. Example loading continues through the same dirty-document guard and serialization path as normal Open. The RPG objective is to talk with Mira and find the Moon crystal; the platformer objective is to cross the hazard gap, reach the checkpoint, and touch Finish. The packaged example levels are included in the Windows artifact.

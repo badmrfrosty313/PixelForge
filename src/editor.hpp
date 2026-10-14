@@ -60,6 +60,7 @@ class Editor {
   bool dialog_pending_ = false, close_new_popup_ = false,
        close_open_popup_ = false;
   bool error_popup_pending_ = false;
+  bool show_welcome_ = true;
   bool confirm_new_ = false, confirm_open_ = false, confirm_close_ = false;
   bool close_requested_ = false;
   bool reset_layout_requested_ = false, focus_editor_canvas_ = false;

@@ -255,6 +255,7 @@ void Editor::poll_dialog_result() {
     if (save_level_to(target)) {
       if (intent == SaveIntent::create_new) {
         new_level();
+        show_welcome_ = false;
         close_new_popup_ = true;
       } else if (intent == SaveIntent::open_level) {
         open_path(pending_open_path_);
@@ -366,6 +367,7 @@ void Editor::open_path(const std::filesystem::path &path) {
     document_.mark_saved();
     document_path_ = target;
     pending_tileset_source_.clear();
+    show_welcome_ = false;
     genre_ = document_.level().genre == Genre::top_down_rpg ? 0 : 1;
     width_ = document_.level().width;
     height_ = document_.level().height;
@@ -409,6 +411,8 @@ void Editor::toolbar() {
         else
           new_level();
       }
+      if (ImGui::MenuItem("Welcome"))
+        show_welcome_ = true;
       if (ImGui::MenuItem("Open...", "Ctrl+O", false, !dialog_pending_))
         request_open_dialog();
       if (ImGui::MenuItem("Save", "Ctrl+S", false, !dialog_pending_))
@@ -548,12 +552,14 @@ void Editor::toolbar() {
         request_save_dialog(SaveIntent::create_new);
       else if (save_level()) {
         new_level();
+        show_welcome_ = false;
         ImGui::CloseCurrentPopup();
       }
     }
     ImGui::SameLine();
     if (ImGui::Button("Discard and create")) {
       new_level();
+      show_welcome_ = false;
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
@@ -1260,6 +1266,69 @@ void Editor::draw() {
       ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
   set_default_layout(dockspace_id, reset_layout_requested_);
   toolbar();
+  if (show_welcome_) {
+    const float ui_scale = static_cast<float>(ui_scale_percent_) / 100.0f;
+    const ImVec2 work_size = ImGui::GetMainViewport()->WorkSize;
+    const float welcome_width = std::min(560.0f * ui_scale,
+                                        std::max(320.0f, work_size.x - 24.0f));
+    const float welcome_height = std::min(400.0f * ui_scale,
+                                         std::max(280.0f, work_size.y - 24.0f));
+    const float button_width = std::min(245.0f * ui_scale,
+                                        welcome_width - 40.0f);
+    const bool side_by_side = work_size.x >= button_width * 2.0f + 48.0f;
+    ImGui::SetNextWindowSize(ImVec2(welcome_width, welcome_height),
+                             ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Welcome to PixelForge", &show_welcome_)) {
+      ImGui::TextWrapped("Build and playtest top-down RPGs and platformers in one workspace.");
+      ImGui::Spacing();
+      if (ImGui::Button("New RPG level", ImVec2(button_width, 42.0f * ui_scale))) {
+        genre_ = 0;
+        if (document_.dirty())
+          confirm_new_ = true;
+        else {
+          new_level();
+          show_welcome_ = false;
+        }
+      }
+      if (side_by_side)
+        ImGui::SameLine();
+      if (ImGui::Button("New platformer level", ImVec2(button_width, 42.0f * ui_scale))) {
+        genre_ = 1;
+        if (document_.dirty())
+          confirm_new_ = true;
+        else {
+          new_level();
+          show_welcome_ = false;
+        }
+      }
+      if (ImGui::Button("Open an existing level...", ImVec2(button_width, 38.0f * ui_scale)))
+        request_open_dialog();
+      ImGui::Separator();
+      ImGui::TextUnformatted("Try a demo");
+      ImGui::TextWrapped("RPG: Talk with Mira and find the Moon crystal. Platformer: cross the spike gap, touch the checkpoint, and reach Finish.");
+      if (ImGui::Button("RPG village", ImVec2(button_width, 42.0f * ui_scale))) {
+        pending_open_path_ = resource_root_ / "examples/rpg.json";
+        if (document_.dirty())
+          confirm_open_ = true;
+        else
+          open_path(pending_open_path_);
+      }
+      if (side_by_side)
+        ImGui::SameLine();
+      if (ImGui::Button("Platformer challenge", ImVec2(button_width, 42.0f * ui_scale))) {
+        pending_open_path_ = resource_root_ / "examples/platformer.json";
+        if (document_.dirty())
+          confirm_open_ = true;
+        else
+          open_path(pending_open_path_);
+      }
+      ImGui::Spacing();
+      ImGui::TextWrapped("Edit with the mouse, then press Play. In playtest use WASD or arrows, Space to jump, and E to interact. Save from File → Save As.");
+      if (ImGui::Button("Continue to editor"))
+        show_welcome_ = false;
+    }
+    ImGui::End();
+  }
   ImGui::Begin("Tileset Palette");
   ImGui::Combo("New genre", &genre_, "Top-down RPG\0Platformer\0");
   ImGui::InputInt("New width", &width_);
