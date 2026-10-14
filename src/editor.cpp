@@ -23,6 +23,10 @@ const char *tool_name(Tool t) {
     return "Fill";
   case Tool::eyedropper:
     return "Eyedropper";
+  case Tool::collision:
+    return "Collision";
+  case Tool::entity:
+    return "Entity";
   }
   return "Tool";
 }
@@ -42,8 +46,6 @@ Editor::Editor(SDL_Renderer *renderer) : renderer_(renderer) {
       default_path = std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR) /
                      "studio_tiles.png";
   }
-  const auto text = default_path.string();
-  std::snprintf(tileset_path_, sizeof(tileset_path_), "%s", text.c_str());
   try {
     tileset_.load(renderer_, default_path, tile_width_, tile_height_);
     status_ = "Loaded original Studio tileset";
@@ -80,14 +82,49 @@ void Editor::open_path() {
       stroke_active_ = false;
     }
     auto loaded = load(path_);
+    std::string asset_warning;
+    std::vector<std::filesystem::path> asset_candidates{
+        std::filesystem::current_path() / loaded.tileset_path};
+    if (const char *executable_base = SDL_GetBasePath();
+        executable_base && *executable_base)
+      asset_candidates.emplace_back(std::filesystem::path(executable_base) /
+                                    loaded.tileset_path);
+    asset_candidates.emplace_back(
+        std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR).parent_path() /
+        loaded.tileset_path);
+    std::exception_ptr asset_error;
+    for (const auto &asset_path : asset_candidates) {
+      try {
+        tileset_.load(renderer_, asset_path, loaded.atlas_tile_width,
+                      loaded.atlas_tile_height);
+        asset_error = nullptr;
+        break;
+      } catch (...) {
+        asset_error = std::current_exception();
+      }
+    }
+    if (asset_error) {
+      try {
+        std::rethrow_exception(asset_error);
+      } catch (const std::exception &error) {
+        asset_warning = std::string("; tileset unavailable: ") + error.what();
+      }
+    } else {
+      std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                    loaded.tileset_path.c_str());
+      tile_width_ = loaded.atlas_tile_width;
+      tile_height_ = loaded.atlas_tile_height;
+    }
     document_ = Document(std::move(loaded));
     document_.mark_saved();
     document_path_ = path_;
     genre_ = document_.level().genre == Genre::top_down_rpg ? 0 : 1;
     width_ = document_.level().width;
     height_ = document_.level().height;
+    level_tile_width_ = document_.level().tile_width;
+    level_tile_height_ = document_.level().tile_height;
     set_active_layer(0);
-    status_ = "Opened level";
+    status_ = "Opened level" + asset_warning;
   } catch (const std::exception &e) {
     status_ = e.what();
   }
@@ -98,13 +135,20 @@ void Editor::new_level() {
       document_.end_stroke();
       stroke_active_ = false;
     }
-    document_ =
-        Document(Level(genre_ == 0 ? Genre::top_down_rpg : Genre::platformer,
-                       width_, height_));
+    Level level(genre_ == 0 ? Genre::top_down_rpg : Genre::platformer, width_,
+                height_);
+    level.tile_width = level_tile_width_;
+    level.tile_height = level_tile_height_;
+    level.atlas_tile_width = tile_width_;
+    level.atlas_tile_height = tile_height_;
+    level.tileset_path = tileset_path_;
+    level.validate();
+    document_ = Document(std::move(level));
     document_path_.clear();
     std::snprintf(path_, sizeof(path_), "level.json");
     set_active_layer(0);
     status_ = "Created new level";
+    selected_entity_id_ = 0;
   } catch (const std::exception &e) {
     status_ = e.what();
   }
@@ -164,8 +208,9 @@ void Editor::toolbar() {
     if (ImGui::Button("Redo"))
       document_.redo();
     ImGui::SameLine();
-    for (auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle, Tool::line,
-                      Tool::fill, Tool::eyedropper}) {
+    for (auto tool :
+         {Tool::pencil, Tool::eraser, Tool::rectangle, Tool::line, Tool::fill,
+          Tool::eyedropper, Tool::collision, Tool::entity}) {
       if (tool != Tool::pencil)
         ImGui::SameLine();
       if (tool_ == tool)
@@ -195,6 +240,8 @@ void Editor::toolbar() {
                 document_.dirty() ? " *" : "", document_.level().width,
                 document_.level().height, zoom_ * 100.0f);
   }
+  ImGui::SameLine();
+  ImGui::Checkbox("Collision", &collision_visible_);
   ImGui::End();
   if (confirm_new_) {
     ImGui::OpenPopup("Discard edits before New?");
@@ -323,6 +370,99 @@ void Editor::layers_panel() {
       "Top rows draw above lower rows. V toggles visibility; L locks editing.");
   ImGui::End();
 }
+void Editor::sync_entity_fields() {
+  const auto &entities = document_.level().entities;
+  const auto it =
+      std::find_if(entities.begin(), entities.end(), [&](const auto &entity) {
+        return entity.id == selected_entity_id_;
+      });
+  if (it == entities.end()) {
+    selected_entity_id_ = 0;
+    entity_name_[0] = entity_message_[0] = '\0';
+    return;
+  }
+  entity_x_ = it->x;
+  entity_y_ = it->y;
+  const EntityType types[] = {EntityType::player_spawn, EntityType::npc,
+                              EntityType::enemy,        EntityType::collectible,
+                              EntityType::trigger,      EntityType::checkpoint,
+                              EntityType::hazard};
+  for (int i = 0; i < 7; ++i)
+    if (types[i] == it->type)
+      entity_type_index_ = i;
+  const auto name = it->properties.find("name");
+  if (name != it->properties.end() && name->second.is_string())
+    std::snprintf(entity_name_, sizeof(entity_name_), "%s",
+                  name->second.get<std::string>().c_str());
+  else
+    entity_name_[0] = '\0';
+  const auto message = it->properties.find("message");
+  if (message != it->properties.end() && message->second.is_string())
+    std::snprintf(entity_message_, sizeof(entity_message_), "%s",
+                  message->second.get<std::string>().c_str());
+  else
+    entity_message_[0] = '\0';
+}
+void Editor::entity_inspector() {
+  ImGui::SetNextWindowPos(ImVec2(1016, 88), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(256, 320), ImGuiCond_FirstUseEver);
+  ImGui::Begin("Entities");
+  const char *types =
+      "Player spawn\0NPC\0Enemy\0Collectible\0Trigger\0Checkpoint\0Hazard\0";
+  ImGui::Combo("Place type", &entity_type_index_, types);
+  const auto &entities = document_.level().entities;
+  auto found =
+      std::find_if(entities.begin(), entities.end(), [&](const auto &entity) {
+        return entity.id == selected_entity_id_;
+      });
+  if (found == entities.end()) {
+    selected_entity_id_ = 0;
+    ImGui::TextWrapped(
+        "Choose Entity and click the canvas to place an entity.");
+    ImGui::End();
+    return;
+  }
+  ImGui::Text("ID: %llu | %s", static_cast<unsigned long long>(found->id),
+              entity_type_name(found->type).c_str());
+  ImGui::InputFloat("X", &entity_x_, 0.25f, 1.0f, "%.2f");
+  ImGui::InputFloat("Y", &entity_y_, 0.25f, 1.0f, "%.2f");
+  ImGui::InputText("Name", entity_name_, sizeof(entity_name_));
+  ImGui::InputTextMultiline("Message", entity_message_, sizeof(entity_message_),
+                            ImVec2(0, 70));
+  if (ImGui::Button("Apply properties")) {
+    Entity changed = *found;
+    changed.x = entity_x_;
+    changed.y = entity_y_;
+    if (entity_name_[0])
+      changed.properties["name"] = entity_name_;
+    else
+      changed.properties.erase("name");
+    if (entity_message_[0])
+      changed.properties["message"] = entity_message_;
+    else
+      changed.properties.erase("message");
+    try {
+      document_.update_entity(std::move(changed));
+      mark_dirty_status();
+    } catch (const std::exception &e) {
+      status_ = e.what();
+    }
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Delete entity")) {
+    try {
+      document_.delete_entity(selected_entity_id_);
+      selected_entity_id_ = 0;
+      entity_name_[0] = entity_message_[0] = '\0';
+      mark_dirty_status();
+    } catch (const std::exception &e) {
+      status_ = e.what();
+    }
+  }
+  ImGui::TextWrapped("Select and drag markers with the Entity tool. Entity "
+                     "coordinates use tile units.");
+  ImGui::End();
+}
 void Editor::canvas() {
   ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
@@ -388,11 +528,12 @@ void Editor::canvas() {
     pan_x_ += io.MouseDelta.x;
     pan_y_ += io.MouseDelta.y;
   }
-  float cell = 24 * zoom_;
+  float cell_x = document_.level().tile_width * zoom_;
+  float cell_y = document_.level().tile_height * zoom_;
   ImVec2 origin(pos.x + pan_x_, pos.y + pan_y_);
   auto cursor_cell = [&]() {
-    int x = static_cast<int>(std::floor((io.MousePos.x - origin.x) / cell)),
-        y = static_cast<int>(std::floor((io.MousePos.y - origin.y) / cell));
+    int x = static_cast<int>(std::floor((io.MousePos.x - origin.x) / cell_x)),
+        y = static_cast<int>(std::floor((io.MousePos.y - origin.y) / cell_y));
     return std::pair{x, y};
   };
   auto [mx, my] = cursor_cell();
@@ -407,9 +548,51 @@ void Editor::canvas() {
       previous_x_ = mx;
       previous_y_ = my;
       document_.paint_line(stroke_layer_, mx, my, mx, my, stroke_value_);
+    } else if (tool_ == Tool::collision) {
+      collision_value_ = !document_.solid(mx, my);
+      document_.begin_collision_stroke();
+      collision_stroke_active_ = true;
+      previous_x_ = mx;
+      previous_y_ = my;
+      document_.paint_collision_line(mx, my, mx, my, collision_value_);
+    } else if (tool_ == Tool::entity) {
+      const auto &entities = document_.level().entities;
+      const Entity *found = nullptr;
+      const float world_x = (io.MousePos.x - origin.x) / cell_x;
+      const float world_y = (io.MousePos.y - origin.y) / cell_y;
+      for (auto it = entities.rbegin(); it != entities.rend(); ++it)
+        if (std::abs(it->x - world_x) < 0.5f &&
+            std::abs(it->y - world_y) < 0.5f) {
+          found = &*it;
+          break;
+        }
+      try {
+        if (found) {
+          selected_entity_id_ = found->id;
+          entity_drag_id_ = found->id;
+          entity_drag_active_ = true;
+          entity_drag_x_ = found->x;
+          entity_drag_y_ = found->y;
+          sync_entity_fields();
+        } else {
+          const EntityType types[] = {
+              EntityType::player_spawn, EntityType::npc,
+              EntityType::enemy,        EntityType::collectible,
+              EntityType::trigger,      EntityType::checkpoint,
+              EntityType::hazard};
+          const auto id = document_.add_entity(types[entity_type_index_],
+                                               mx + 0.5f, my + 0.5f);
+          selected_entity_id_ = id;
+          sync_entity_fields();
+          mark_dirty_status();
+        }
+      } catch (const std::exception &e) {
+        status_ = e.what();
+      }
     } else if (tool_ == Tool::rectangle || tool_ == Tool::line) {
       gesture_active_ = true;
       gesture_tool_ = tool_;
+      gesture_value_ = selected_tile_;
       gesture_layer_ = active_layer_;
       gesture_x_ = mx;
       gesture_y_ = my;
@@ -424,6 +607,47 @@ void Editor::canvas() {
       selected_tile_ = document_.tile(active_layer_, mx, my);
       tool_ = Tool::pencil;
     }
+  }
+  if (collision_stroke_active_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    auto [x, y] = cursor_cell();
+    x = std::clamp(x, 0, document_.level().width - 1);
+    y = std::clamp(y, 0, document_.level().height - 1);
+    document_.paint_collision_line(previous_x_, previous_y_, x, y,
+                                   collision_value_);
+    previous_x_ = x;
+    previous_y_ = y;
+  }
+  if (collision_stroke_active_ &&
+      ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    auto [x, y] = cursor_cell();
+    x = std::clamp(x, 0, document_.level().width - 1);
+    y = std::clamp(y, 0, document_.level().height - 1);
+    document_.paint_collision_line(previous_x_, previous_y_, x, y,
+                                   collision_value_);
+    document_.end_collision_stroke();
+    collision_stroke_active_ = false;
+    mark_dirty_status();
+  }
+  if (entity_drag_active_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    auto [x, y] = cursor_cell();
+    Entity moved;
+    const auto &entities = document_.level().entities;
+    auto it =
+        std::find_if(entities.begin(), entities.end(),
+                     [&](const auto &e) { return e.id == entity_drag_id_; });
+    if (it != entities.end()) {
+      moved = *it;
+      moved.x = std::clamp(x, 0, document_.level().width - 1) + 0.5f;
+      moved.y = std::clamp(y, 0, document_.level().height - 1) + 0.5f;
+      try {
+        document_.update_entity(std::move(moved));
+        sync_entity_fields();
+        mark_dirty_status();
+      } catch (const std::exception &e) {
+        status_ = e.what();
+      }
+    }
+    entity_drag_active_ = false;
   }
   if (stroke_active_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
     auto [x, y] = cursor_cell();
@@ -447,10 +671,10 @@ void Editor::canvas() {
     y = std::clamp(y, 0, document_.level().height - 1);
     if (gesture_tool_ == Tool::line)
       document_.line(gesture_layer_, gesture_x_, gesture_y_, x, y,
-                     selected_tile_);
+                     gesture_value_);
     else
       document_.rectangle(gesture_layer_, gesture_x_, gesture_y_, x, y,
-                          selected_tile_);
+                          gesture_value_);
     gesture_active_ = false;
     mark_dirty_status();
   }
@@ -463,29 +687,32 @@ void Editor::canvas() {
   draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
                       IM_COL32(25, 28, 34, 255));
   if (fit_requested_) {
-    zoom_ = std::clamp(std::min(size.x / (document_.level().width * 24.0f),
-                                size.y / (document_.level().height * 24.0f)),
+    zoom_ = std::clamp(std::min(size.x / (document_.level().width *
+                                          document_.level().tile_width),
+                                size.y / (document_.level().height *
+                                          document_.level().tile_height)),
                        0.2f, 6.0f);
-    cell = 24 * zoom_;
-    pan_x_ = (size.x - document_.level().width * cell) * 0.5f;
-    pan_y_ = (size.y - document_.level().height * cell) * 0.5f;
+    cell_x = document_.level().tile_width * zoom_;
+    cell_y = document_.level().tile_height * zoom_;
+    pan_x_ = (size.x - document_.level().width * cell_x) * 0.5f;
+    pan_y_ = (size.y - document_.level().height * cell_y) * 0.5f;
     origin = ImVec2(pos.x + pan_x_, pos.y + pan_y_);
     fit_requested_ = false;
   }
-  const int x0 = std::clamp(static_cast<int>(std::floor(-pan_x_ / cell)), 0,
+  const int x0 = std::clamp(static_cast<int>(std::floor(-pan_x_ / cell_x)), 0,
                             document_.level().width),
-            y0 = std::clamp(static_cast<int>(std::floor(-pan_y_ / cell)), 0,
+            y0 = std::clamp(static_cast<int>(std::floor(-pan_y_ / cell_y)), 0,
                             document_.level().height);
   const int x1 = std::clamp(
-                static_cast<int>(std::ceil((size.x - pan_x_) / cell)), 0,
+                static_cast<int>(std::ceil((size.x - pan_x_) / cell_x)), 0,
                 document_.level().width),
             y1 = std::clamp(
-                static_cast<int>(std::ceil((size.y - pan_y_) / cell)), 0,
+                static_cast<int>(std::ceil((size.y - pan_y_) / cell_y)), 0,
                 document_.level().height);
   for (int y = y0; y < y1; ++y)
     for (int x = x0; x < x1; ++x) {
-      ImVec2 a(origin.x + x * cell, origin.y + y * cell),
-          b(a.x + cell, a.y + cell);
+      ImVec2 a(origin.x + x * cell_x, origin.y + y * cell_y),
+          b(a.x + cell_x, a.y + cell_y);
       for (const auto &layer : document_.level().layers)
         if (layer.visible) {
           int id = layer.tiles[static_cast<std::size_t>(
@@ -493,21 +720,38 @@ void Editor::canvas() {
           if (id)
             draw_tile(draw, tileset_, id, a, b);
         }
+      const auto collision_index =
+          static_cast<std::size_t>(y * document_.level().width + x);
+      if (collision_visible_ && document_.level().collision[collision_index])
+        draw->AddRectFilled(a, b, IM_COL32(220, 35, 55, 115));
       if (grid_visible_)
         draw->AddRect(a, b, IM_COL32(40, 53, 59, 160));
     }
+  for (const auto &entity : document_.level().entities) {
+    ImVec2 center(origin.x + entity.x * cell_x, origin.y + entity.y * cell_y);
+    const ImU32 color =
+        entity.type == EntityType::player_spawn  ? IM_COL32(70, 210, 130, 255)
+        : entity.type == EntityType::npc         ? IM_COL32(80, 170, 255, 255)
+        : entity.type == EntityType::hazard      ? IM_COL32(255, 75, 65, 255)
+        : entity.type == EntityType::collectible ? IM_COL32(255, 215, 80, 255)
+                                                 : IM_COL32(190, 125, 240, 255);
+    draw->AddCircleFilled(center, std::max(5.0f, cell_x * 0.23f), color);
+    if (entity.id == selected_entity_id_)
+      draw->AddCircle(center, std::max(7.0f, cell_x * 0.3f),
+                      IM_COL32(255, 255, 255, 255), 0, 2.0f);
+  }
   if (gesture_active_) {
     auto [x, y] = cursor_cell();
-    ImVec2 a(origin.x + std::min(gesture_x_, x) * cell,
-             origin.y + std::min(gesture_y_, y) * cell),
-        b(origin.x + (std::max(gesture_x_, x) + 1) * cell,
-          origin.y + (std::max(gesture_y_, y) + 1) * cell);
+    ImVec2 a(origin.x + std::min(gesture_x_, x) * cell_x,
+             origin.y + std::min(gesture_y_, y) * cell_y),
+        b(origin.x + (std::max(gesture_x_, x) + 1) * cell_x,
+          origin.y + (std::max(gesture_y_, y) + 1) * cell_y);
     if (gesture_tool_ == Tool::line)
-      draw->AddLine(
-          ImVec2(origin.x + (gesture_x_ + 0.5f) * cell,
-                 origin.y + (gesture_y_ + 0.5f) * cell),
-          ImVec2(origin.x + (x + 0.5f) * cell, origin.y + (y + 0.5f) * cell),
-          IM_COL32(255, 230, 125, 255), 2.0f);
+      draw->AddLine(ImVec2(origin.x + (gesture_x_ + 0.5f) * cell_x,
+                           origin.y + (gesture_y_ + 0.5f) * cell_y),
+                    ImVec2(origin.x + (x + 0.5f) * cell_x,
+                           origin.y + (y + 0.5f) * cell_y),
+                    IM_COL32(255, 230, 125, 255), 2.0f);
     else
       draw->AddRect(a, b, IM_COL32(255, 230, 125, 255), 0, 0, 2.0f);
   }
@@ -523,6 +767,8 @@ void Editor::draw() {
   ImGui::Combo("New genre", &genre_, "Top-down RPG\0Platformer\0");
   ImGui::InputInt("New width", &width_);
   ImGui::InputInt("New height", &height_);
+  ImGui::InputInt("Cell width", &level_tile_width_);
+  ImGui::InputInt("Cell height", &level_tile_height_);
   if (ImGui::Button("New level")) {
     if (document_.dirty())
       confirm_new_ = true;
@@ -546,7 +792,17 @@ void Editor::draw() {
   ImGui::InputInt("Tile height", &tile_height_);
   if (ImGui::Button("Load PNG")) {
     try {
+      Level settings = document_.level();
+      settings.tileset_path = tileset_path_;
+      settings.tile_width = level_tile_width_;
+      settings.tile_height = level_tile_height_;
+      settings.atlas_tile_width = tile_width_;
+      settings.atlas_tile_height = tile_height_;
+      settings.validate();
       tileset_.load(renderer_, tileset_path_, tile_width_, tile_height_);
+      document_.set_asset_settings(tileset_path_, level_tile_width_,
+                                   level_tile_height_, tile_width_,
+                                   tile_height_);
       selected_tile_ = 1;
       status_ = "Loaded PNG tileset";
     } catch (const std::exception &e) {
@@ -583,6 +839,7 @@ void Editor::draw() {
                      std::min(tileset_.tile_count(), 255));
   ImGui::End();
   layers_panel();
+  entity_inspector();
   canvas();
   const ImVec2 vp = ImGui::GetMainViewport()->Pos,
                vsz = ImGui::GetMainViewport()->Size;

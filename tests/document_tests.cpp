@@ -72,6 +72,41 @@ int main() {
     fill.flood_fill(0, 0, 0, 9);
     check(fill.level() == filled && fill.dirty() == was_dirty);
     rejects([&] { fill.flood_fill(0, 0, 0, 300); });
+    Document world(Level(Genre::top_down_rpg, 6, 5));
+    world.begin_collision_stroke();
+    world.paint_collision_line(0, 2, 5, 2, true);
+    world.paint_collision_line(5, 2, 5, 4, true);
+    world.end_collision_stroke();
+    check(world.solid(0, 2) && world.solid(5, 4));
+    world.undo();
+    check(!world.solid(0, 2) && !world.solid(5, 4));
+    world.redo();
+    check(world.solid(3, 2));
+    const auto npc_id = world.add_entity(EntityType::npc, 2.5f, 1.5f);
+    Entity npc = world.level().entities.front();
+    npc.properties["name"] = "Guide";
+    npc.properties["message"] = "Go north";
+    world.update_entity(npc);
+    check(world.level().entities[0].id == npc_id &&
+          world.level().entities[0].properties.at("name") == "Guide");
+    world.undo();
+    check(world.level().entities[0].properties.empty());
+    world.redo();
+    world.delete_entity(npc_id);
+    check(world.level().entities.empty());
+    world.undo();
+    check(world.level().entities.size() == 1);
+    rejects([&] { world.add_entity(EntityType::hazard, -1, 0); });
+    const auto hazard_id = world.add_entity(EntityType::hazard, 1, 1);
+    check(hazard_id != npc_id);
+    const auto saved_world = world.level();
+    world.set_asset_settings("assets/other.png", 32, 32, 8, 8);
+    check(world.level().tile_width == 32 && world.dirty());
+    world.undo();
+    check(world.level().tileset_path == saved_world.tileset_path &&
+          world.level().tile_width == 24);
+    world.redo();
+    check(world.level().atlas_tile_width == 8);
     Document layers(Level(Genre::top_down_rpg, 3, 2));
     layers.mark_saved();
     layers.create_layer("Details");
@@ -106,6 +141,10 @@ int main() {
     auto legacy = serialize(Level{});
     auto j = nlohmann::json::parse(legacy);
     j["version"] = 1;
+    j.erase("tile_size");
+    j.erase("tileset");
+    j.erase("collision");
+    j.erase("entities");
     for (auto &l : j["layers"]) {
       l.erase("visible");
       l.erase("locked");

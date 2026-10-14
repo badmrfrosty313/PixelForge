@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
       rejects([&] { deserialize(j.dump()); });
     };
     invalid([](auto &j) { j["genre"] = "unknown"; });
-    invalid([](auto &j) { j["version"] = 2; });
+    invalid([](auto &j) { j["version"] = 3; });
     invalid([](auto &j) { j["width"] = 1.5; });
     invalid([](auto &j) { j["width"] = 4294967297ULL; });
     invalid([](auto &j) { j["layers"] = nlohmann::json::array(); });
@@ -66,6 +66,64 @@ int main(int argc, char **argv) {
     invalid([](auto &j) { j["layers"][0]["tiles"][0] = 256; });
     invalid([](auto &j) { j["layers"][0]["tiles"][0] = 1.1; });
     invalid([](auto &j) { j["layers"][0]["name"] = ""; });
+    invalid([](auto &j) { j["extra"] = true; });
+    invalid([](auto &j) { j["collision"].erase(0); });
+    invalid([](auto &j) { j["collision"][0] = 2; });
+    invalid([](auto &j) { j["tile_size"]["width"] = 0; });
+    invalid([](auto &j) { j["tileset"]["path"] = "../outside.png"; });
+    invalid([](auto &j) { j["tileset"]["path"] = "/tmp/outside.png"; });
+    invalid([](auto &j) {
+      j["entities"].push_back({{"id", 1},
+                               {"type", "npc"},
+                               {"x", 1.0},
+                               {"y", 1.0},
+                               {"properties", nlohmann::json::object()}});
+      j["entities"].push_back(j["entities"][0]);
+    });
+    invalid([](auto &j) {
+      j["entities"].push_back({{"id", 1},
+                               {"type", "npc"},
+                               {"x", -1.0},
+                               {"y", 1.0},
+                               {"properties", nlohmann::json::object()}});
+    });
+    invalid([](auto &j) {
+      j["entities"].push_back({{"id", 1},
+                               {"type", "unknown"},
+                               {"x", 1.0},
+                               {"y", 1.0},
+                               {"properties", nlohmann::json::object()}});
+    });
+    invalid([](auto &j) {
+      j["entities"].push_back({{"id", 1},
+                               {"type", "npc"},
+                               {"x", 1.0},
+                               {"y", 1.0},
+                               {"properties", nlohmann::json::object()},
+                               {"extra", true}});
+    });
+    auto legacy = base;
+    legacy["version"] = 1;
+    legacy.erase("tile_size");
+    legacy.erase("tileset");
+    legacy.erase("collision");
+    legacy.erase("entities");
+    legacy["layers"][0].erase("visible");
+    legacy["layers"][0].erase("locked");
+    const auto migrated = deserialize(legacy.dump());
+    check(migrated.tile_width == 24 && migrated.tile_height == 24);
+    check(migrated.layers[0].visible && !migrated.layers[0].locked);
+    check(migrated.collision.size() == 4 && migrated.entities.empty());
+    Level world(Genre::top_down_rpg, 3, 2);
+    world.set_solid(1, 1, true);
+    world.entities.push_back({7,
+                              EntityType::npc,
+                              1.5f,
+                              0.5f,
+                              {{"name", "Ada"}, {"dialogue", "Hello"}}});
+    check(world.solid(1, 1) && world.solid(-1, 0) && !world.solid(0, 0));
+    check(deserialize(serialize(world)) == world);
+    rejects([&] { world.set_solid(3, 0, true); });
     rejects([] { load("missing-pixelforge-level.json"); });
     rejects([] {
       Level l;

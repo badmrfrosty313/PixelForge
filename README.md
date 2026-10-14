@@ -1,6 +1,6 @@
 # PixelForge
 
-A C++20 native 2D level editor for top-down RPGs and platformers. Both genres use the same tile canvas, layer model and JSON format. Milestone 1 contains editing infrastructure, not gameplay simulation.
+A C++20 native 2D level editor for top-down RPGs and platformers. Both genres use the same tile canvas, layer model and JSON format. The Studio Alpha branch builds on the native editing foundation with textured tiles, undoable editing, structured collision and entity data, and versioned level files. Playtest runtime is not implemented yet.
 
 ## Windows build
 
@@ -41,17 +41,19 @@ The Layers panel supports creating, renaming, deleting, reordering, hiding, lock
 - `document`: renderer-independent grouped editing commands and bounded history.
 - `tileset`: PNG atlas slicing and RAII SDL texture ownership.
 - `rendering`: tile rendering helpers.
-- `level`: shared tile/layer model and checked operations, independent of SDL.
-- `serialization`: versioned JSON validation and filesystem I/O, independent of UI.
-- `gameplay.hpp`: reserved boundary for future genre rules; no physics or simulation yet.
+- `level`: shared tile/layer/collision/entity model, independent of SDL.
+- `serialization`: strict versioned JSON validation and filesystem I/O, independent of UI.
+- `gameplay`: reserved boundary for genre controllers; no physics or simulation yet.
 
-JSON version 1 stores `genre`, integer `width`/`height`, and `layers` containing names, row-major integer `tiles` (index y*width+x), visibility, and lock state. Old version 1 maps without visibility/lock fields load as visible and unlocked. Zero is empty. Unknown genres/versions, invalid dimensions, malformed layers, wrong tile counts and invalid IDs are rejected. Input is capped at 16 MiB. Model tests cover paint/erase bounds, both genres, file round-trips, malformed input, sample levels, and invalid levels. Document tests cover interpolated strokes, undo/redo, redo invalidation, shape and fill tools, no-op edits, history bounds, layer edits/locks, and dirty-state restoration. The editor smoke test loads the bundled PNG through stb_image and SDL, then renders using the dummy video driver.
+Version 2 saves include genre, map and tile dimensions, a safe relative tileset reference and atlas cell size, ordered visual layers with visibility/lock state, row-major tile data, an explicit boolean collision grid, and typed entities with stable IDs and JSON properties. Version 1 files remain readable; missing layer state defaults to visible and unlocked, tile size defaults to 24x24, and the bundled atlas is selected. Unknown fields and unsupported versions are rejected instead of discarded. Paths must be relative and cannot traverse upward. Inputs and serialized documents are capped at 16 MiB.
+
+Model tests cover geometry and collision bounds, v1 migration, v2 round-trips for both genres, unsafe references, malformed/unknown data, duplicate entity IDs, and bundled examples. Document tests cover grouped tile and collision strokes, undo/redo, layer operations, entity CRUD, invalid coordinates, asset settings, and dirty state. The editor smoke test loads the bundled PNG through stb_image and SDL, then renders using the dummy video driver.
 
 ## Validation and limitations
 
 Use CTest as above. The current automated test programs report 42 model checks and 50 document checks; CTest also starts the real SDL/ImGui editor with its bundled PNG atlas. Manually on Windows: open both examples, paint/erase, use each tool, undo/redo a stroke and layer operation, hide/lock layers, zoom/pan/fit, save and reopen. A dummy-driver smoke pass cannot establish interactive desktop input or visual quality.
 
-No native file picker, close-time unsaved prompt, atomic save, entities, collision editing, gameplay runtime, Windows ZIP package, or screenshots yet. Phase 1 has no RPG/platformer physics or playtest mode. Continue with structured world data and serialization only after Phase 1 CI and acceptance checks pass.
+No native file picker, close-time unsaved prompt, atomic save, gameplay runtime, Windows ZIP package, or genuine screenshots are included yet. Phase 2 introduces editable entity and collision data, but the controllers and playtest mode remain future work. Interactive desktop behavior and Windows runtime still require manual verification.
 
 ## Studio Alpha Phase 1
 
@@ -59,7 +61,7 @@ The current `codex/pixelforge-studio-alpha` branch adds a shared image-based edi
 
 A small original pixel-art atlas is included at `assets/studio_tiles.png` under CC0 terms in `assets/LICENSE.txt`. The Tileset Palette loads PNG atlases, slices them by configurable tile width/height, displays selectable previews, and uses nearest-neighbor texture sampling with alpha. Image dimensions must be divisible by tile size and stay under 16 megapixels. The renderer reports invalid atlas indices instead of silently drawing the wrong tile.
 
-The toolbar offers Pencil, Eraser, Rectangle, Line, Flood Fill, Eyedropper, grid toggle, Fit, and 100% reset. Pencil strokes interpolate every crossed cell and form one undo entry. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. No-op edits do not enter history; history retains up to 64 operations and 16 MiB of deltas/snapshots. The Layers panel creates, renames, deletes, reorders, hides, locks, and selects layers. The only remaining layer cannot be deleted. Layer visibility and locks save in version 1 JSON; old version 1 files default to visible and unlocked.
+The toolbar offers Pencil, Eraser, Rectangle, Line, Flood Fill, Eyedropper, grid toggle, Fit, and 100% reset. Pencil strokes interpolate every crossed cell and form one undo entry. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. No-op edits do not enter history; history retains up to 64 operations and 16 MiB of deltas/snapshots. The Layers panel creates, renames, deletes, reorders, hides, locks, and selects layers. The only remaining layer cannot be deleted. Layer visibility and locks save in version 2 JSON; old version 1 files default to visible and unlocked.
 
 The Tileset Palette provides new genre/dimension inputs plus a level path for Open and Save. Ctrl+N, Ctrl+O, and Ctrl+S are supported while the canvas has keyboard focus. Wheel zooms around the pointer, middle-drag pans, Fit centers the level, and the grid can be hidden. Layer list order matches draw order: higher rows appear over lower rows.
 
@@ -71,10 +73,14 @@ The model test suite now covers grouped strokes and interpolation, undo/redo and
 flowchart TD
     UI[Dear ImGui editor and panels] --> DOC[Document commands and bounded history]
     DOC --> LEVEL[Renderer-independent Level and Layers]
-    LEVEL --> JSON[Version 1 JSON serialization]
+    LEVEL --> JSON[Versioned JSON serialization]
     UI --> CANVAS[Canvas view transform and tools]
     CANVAS --> DOC
     CANVAS --> ATLAS[Tileset PNG decoder and atlas slicing]
     ATLAS --> TEX[RAII-owned SDL texture]
     TEX --> DRAW[SDL renderer / ImGui draw lists]
 ```
+
+## Studio Alpha Phase 2
+
+Phase 2 adds a renderer-independent entity model (player spawn, NPC, enemy, collectible, trigger, checkpoint, hazard) and explicit solid-cell collision data. The canvas exposes collision paint/erase with an overlay and entity placement, selection, dragging, deletion, and a basic property inspector. Entity and collision edits participate in undo/redo. Version 2 JSON persists all world-building data and remains able to load version 1 files. The two examples now include collision and representative RPG/platformer entities. See [Phase 2 design notes](docs/studio-alpha-phase2.md).
