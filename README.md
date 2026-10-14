@@ -1,6 +1,6 @@
 # PixelForge
 
-A C++20 native 2D level editor for top-down RPGs and platformers. Both genres use the same tile canvas, layer model and JSON format. Milestone 1 contains editing infrastructure, not gameplay simulation.
+A C++20 native 2D level editor for top-down RPGs and platformers. Both genres use the same tile canvas, layer model and JSON format. The Studio Alpha branch builds on the native editing foundation with textured tiles, undoable editing, structured collision and entity data, and versioned level files. Playtest runtime is not implemented yet.
 
 ## Windows build
 
@@ -13,7 +13,7 @@ ctest --test-dir build -C Release --output-on-failure
 .\build\Release\PixelForge.exe
 ```
 
-CMake FetchContent downloads pinned SDL 3.2.10, Dear ImGui 1.91.9b docking, and nlohmann JSON 3.12.0 sources from GitHub. SDL is linked statically; no separately installed SDL DLL is required. Internet and Git are needed for the first configure; build/_deps retains dependencies. Dependency licenses are in the fetched source directories. GitHub Actions builds/tests Linux and Windows and uploads the Windows executable.
+CMake FetchContent downloads pinned SDL 3.2.10, Dear ImGui 1.91.9b docking, nlohmann JSON 3.12.0, and stb_image sources from GitHub. SDL is linked statically; no separately installed SDL DLL is required. Internet and Git are needed for the first configure; build/_deps retains dependencies. Dependency licenses are in the fetched source directories. GitHub Actions builds/tests Linux and Windows and uploads a portable Windows ZIP with the executable, demos, tileset, and license notices.
 
 Linux requires GCC 12+/Clang with C++20, CMake, Git, a build tool and desktop development libraries (on Debian: libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev).
 
@@ -26,27 +26,80 @@ ctest --test-dir build --output-on-failure
 
 On a displayless Linux host add `-DSDL_UNIX_CONSOLE_BUILD=ON` at configure; this permits an SDL build without desktop libraries. `SDL_VIDEODRIVER=dummy ./build/PixelForge --smoke` renders three frames using the real SDL/ImGui backends and exits. It does not validate interactive desktop behavior. Core-only development: configure with `-DPIXELFORGE_EDITOR=OFF`.
 
+## Windows package
+
+Download the `PixelForge-Windows` artifact from a successful GitHub Actions run and unzip it. Run `PixelForge.exe` from the package directory. The package contains `assets/studio_tiles.png`, both example levels, this README, and the license texts for the statically linked dependencies. The executable uses the statically linked MSVC runtime and SDL; no separate SDL or Visual C++ runtime installation is expected.
+
 ## Editing
 
-The Level & Tools panel creates maps from 1–256 cells per dimension with either `top_down_rpg` or `platformer` genre. Select a tile ID (1–255), then left-drag on Canvas to paint or right-drag to erase to ID 0. Middle-drag pans; the wheel zooms around the cursor. Colored tiles are placeholders for future tile art. Panels can be docked by dragging their title bars. Layout persists in imgui.ini in the working directory.
+The editor creates maps from 1–256 cells per dimension with either `top_down_rpg` or `platformer` genre. The original procedural pixel-art PNG atlas is loaded from `assets/studio_tiles.png`; the palette lets you load another PNG and set its tile width/height. Select a palette tile and use Pencil to paint. The toolbar also provides Eraser, Rectangle, Line, Flood Fill, and Eyedropper. Pencil drag fills every crossed cell and is one undoable action. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. Grid visibility, Fit, and 100% reset are available in the toolbar. Middle-drag pans; the wheel zooms around the cursor. Panels can be docked by dragging their title bars. Layout persists in imgui.ini in the working directory.
 
-Enter a JSON path and click Save or Load. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading and creating a new map prompt before discarding edits. Closing the application currently does not prompt, so save before exiting. Save overwrites the named file directly; keep backups for important maps.
+Enter a JSON path in the Tileset Palette panel and click Open or Save. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading and creating a new map prompt before discarding edits. Closing the application currently does not prompt, so save before exiting. Save overwrites the named file directly; keep backups for important maps.
 
-Layers are composited in order, and the selected layer receives edits. New maps have one Ground layer; files may contain up to 16 layers. Layer creation/reordering is not yet exposed. Errors appear in the tools panel; a failed load preserves the current level.
+The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level. The Entity tool places and moves entities; the Entities panel edits type, position, name/message properties, and deletion. The Collision tool paints an independent solid grid with an optional overlay.
+
+Click **Play** to run an isolated copy of the current level. Click the canvas to focus controls. Arrows or WASD move; Space or Up jumps in the platformer; E interacts with nearby RPG NPCs. Pause, Reset, and Stop are in the toolbar. Runtime collection, movement, and checkpoints do not modify the editor document. Ctrl+S saves, Ctrl+Shift+S saves to the path in the Level JSON field, and Ctrl+O/Ctrl+N prompt before discarding unsaved edits. Closing with unsaved edits offers Save, Discard, or Cancel. Saves write a same-directory temporary file and replace the destination only after the write succeeds.
 
 ## Architecture
 
 - `application`: RAII SDL window/renderer and ImGui lifecycle, event/render loop.
 - `editor`: workspace, tools, input, zoom/pan and active document.
-- `rendering`: tile palette, with canvas draw commands in the editor.
-- `level`: shared tile/layer model and checked operations, independent of SDL.
-- `serialization`: versioned JSON validation and filesystem I/O, independent of UI.
-- `gameplay.hpp`: reserved boundary for future genre rules; no physics or simulation yet.
+- `document`: renderer-independent grouped editing commands and bounded history.
+- `tileset`: PNG atlas slicing and RAII SDL texture ownership.
+- `rendering`: tile rendering helpers.
+- `level`: shared tile/layer/collision/entity model, independent of SDL.
+- `serialization`: strict versioned JSON validation and filesystem I/O, independent of UI.
+- `gameplay`: runtime world conversion, fixed-step session, shared collision, and isolated top-down/platformer controllers.
 
-JSON version 1 stores `genre`, integer `width`/`height`, and `layers` containing names and row-major integer `tiles` (index y*width+x). Zero is empty. Unknown genres/versions, invalid dimensions, malformed layers, wrong tile counts and invalid IDs are rejected. Input is capped at 16 MiB. Tests cover painting/erasing, bounds, both genres, multiple layers, memory/file round-trips, example maps and malformed data. Editor smoke testing uses SDL's dummy video driver.
+Version 2 saves include genre, map and tile dimensions, a safe relative tileset reference and atlas cell size, ordered visual layers with visibility/lock state, row-major tile data, an explicit boolean collision grid, and typed entities with stable IDs and JSON properties. Version 1 files remain readable; missing layer state defaults to visible and unlocked, tile size defaults to 24x24, and the bundled atlas is selected. Unknown fields and unsupported versions are rejected instead of discarded. Paths must be relative and cannot traverse upward. Inputs and serialized documents are capped at 16 MiB.
+
+Model tests cover geometry and collision bounds, v1 migration, v2 round-trips for both genres, unsafe references, malformed/unknown data, duplicate entity IDs, and bundled examples. Document tests cover grouped tile and collision strokes, undo/redo, layer operations, entity CRUD, invalid coordinates, asset settings, and dirty state. The editor smoke test loads the bundled PNG through stb_image and SDL, then renders using the dummy video driver.
 
 ## Validation and limitations
 
-Use CTest as above; the executable prints the count of model checks. Windows CI is configured but must run on GitHub to establish Windows results. Manually on Windows: create each genre, paint and erase, zoom/pan, dock panels, save, restart, load and compare tiles; also load both examples. A dummy-driver smoke pass cannot establish these interactive results.
+Use CTest as above. The automated test programs currently report 70 model/serialization checks, 62 document/undo checks, and 24 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify entity/collision editing and run both example playtests; graphical desktop controls and visual quality are not proven by the headless smoke test.
 
-No undo, texture tilesets, drag interpolation, native file picker, autosave, entities, collision editing, gameplay, or packaging installer yet. Fast mouse strokes may skip cells between sampled frames. All tile IDs share four repeating display colors. Milestone 2 recommendation: undo/redo, textured tileset palette, layer tools and safe document saving before introducing gameplay.
+No native file picker, Windows ZIP package, or genuine screenshots are included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
+
+## Studio Alpha Phase 1
+
+The current `codex/pixelforge-studio-alpha` branch adds a shared image-based editor on top of the Milestone 1 model. The original `work` branch and PR #1 remain the base. `Level` stays independent of graphics resources; a renderer-independent `Document` owns bounded undo/redo history, and the editor/tileset boundary owns PNG decoding and SDL textures.
+
+A small original pixel-art atlas is included at `assets/studio_tiles.png` under CC0 terms in `assets/LICENSE.txt`. The Tileset Palette loads PNG atlases, slices them by configurable tile width/height, displays selectable previews, and uses nearest-neighbor texture sampling with alpha. Image dimensions must be divisible by tile size and stay under 16 megapixels. The renderer reports invalid atlas indices instead of silently drawing the wrong tile.
+
+The toolbar offers Pencil, Eraser, Rectangle, Line, Flood Fill, Eyedropper, grid toggle, Fit, and 100% reset. Pencil strokes interpolate every crossed cell and form one undo entry. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. No-op edits do not enter history; history retains up to 64 operations and 16 MiB of deltas/snapshots. The Layers panel creates, renames, deletes, reorders, hides, locks, and selects layers. The only remaining layer cannot be deleted. Layer visibility and locks save in version 2 JSON; old version 1 files default to visible and unlocked.
+
+The Tileset Palette provides new genre/dimension inputs plus a level path for Open and Save. Ctrl+N, Ctrl+O, and Ctrl+S are supported while the canvas has keyboard focus. Wheel zooms around the pointer, middle-drag pans, Fit centers the level, and the grid can be hidden. Layer list order matches draw order: higher rows appear over lower rows.
+
+The model test suite now covers grouped strokes and interpolation, undo/redo and branch invalidation, lines, rectangles, fill, bounded history, and undoable layer state. The SDL smoke check loads the bundled PNG, initializes ImGui/SDL rendering, verifies the atlas was accepted, and draws frames on the dummy video driver.
+
+### Architecture sketch
+
+```mermaid
+flowchart TD
+    UI[Dear ImGui editor and panels] --> DOC[Document commands and bounded history]
+    DOC --> LEVEL[Renderer-independent Level, layers, collision, entities]
+    LEVEL --> JSON[Versioned JSON serialization]
+    UI --> CANVAS[Canvas view and tools]
+    CANVAS --> DOC
+    CANVAS --> ATLAS[Tileset PNG decoder and atlas slicing]
+    ATLAS --> TEX[RAII-owned SDL texture]
+    TEX --> DRAW[SDL renderer / ImGui draw lists]
+    LEVEL -. copied at Play .-> RUNTIME[Isolated runtime world]
+    RUNTIME --> TOPDOWN[TopDownController]
+    RUNTIME --> PLATFORMER[PlatformerController]
+    TOPDOWN --> FIXED[60 Hz Session updates]
+    PLATFORMER --> FIXED
+```
+
+## Studio Alpha Phase 2
+
+Phase 2 adds a renderer-independent entity model (player spawn, NPC, enemy, collectible, trigger, checkpoint, hazard) and explicit solid-cell collision data. The canvas exposes collision paint/erase with an overlay and entity placement, selection, dragging, deletion, and a basic property inspector. Entity and collision edits participate in undo/redo. Version 2 JSON persists all world-building data and remains able to load version 1 files. The two examples now include collision and representative RPG/platformer entities. See [Phase 2 design notes](docs/studio-alpha-phase2.md).
+
+## Studio Alpha Phase 3
+
+The built-in playtest runs a renderer-independent copy of the current level at a fixed 60 Hz. `TopDownController` handles normalized four-direction movement, collision, NPC interaction, and collectibles. `PlatformerController` handles horizontal movement, gravity, jumping, tile collision, checkpoints, hazards, and respawn. Both share the same bounds-solid collision world and runtime contact handling. Play, Pause, Reset, and Stop are available from the editor toolbar; see [Phase 3 design notes](docs/studio-alpha-phase3.md).
+
+## Studio Alpha Phase 4
+
+Level saves now write to a temporary sibling file and atomically replace the destination after a successful write. Save As uses the Level JSON path field, and closing a modified document prompts to save, discard, or cancel. New/Open warn before discarding edits. A deterministic failed-replacement test verifies the destination remains intact and temporary files are cleaned up. Native OS file dialogs and portable Windows packaging remain deferred.

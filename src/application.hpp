@@ -1,2 +1,4 @@
 #pragma once
-namespace pf { int run(bool smoke); }
+namespace pf {
+int run(bool smoke);
+}
