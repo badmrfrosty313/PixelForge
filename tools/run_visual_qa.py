@@ -35,13 +35,16 @@ def main() -> int:
     layout = json.loads((args.output_dir / "layout-report.json").read_text(encoding="utf-8"))
     # A contact sheet gives reviewers a fast overview without replacing the
     # full-size native captures or requiring them to approve baselines.
-    selected = [scene for scene in layout["scenes"]
-                if scene["ui_scale_percent"] == 100
-                and (scene["resolution"] == [1662, 896]
-                     or (scene["name"] == "resized-window"
-                         and scene["resolution"] == [1578, 851]))]
+    candidates = [scene for scene in layout["scenes"]
+                  if scene["ui_scale_percent"] == 100]
+    selected_by_scene: dict[str, dict] = {}
+    for scene in candidates:
+        selected_by_scene.setdefault(scene["name"], scene)
+        if scene["resolution"] == [1662, 896]:
+            selected_by_scene[scene["name"]] = scene
+    selected = list(selected_by_scene.values())
     if len(selected) != 12:
-        print(f"Expected 12 representative contact-sheet scenes, found {len(selected)}",
+        print(f"Expected captures for 12 scenes, found {len(selected)}",
               file=sys.stderr)
         return 2
     columns, thumb_width, gap, caption_height = 3, 480, 16, 34
