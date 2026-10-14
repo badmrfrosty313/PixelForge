@@ -1,6 +1,6 @@
 # PixelForge v1.0.0 release readiness
 
-This checklist records observed evidence, not intended behavior. At the initial audit, the Beta branch pointed to `687b4cc197670ab53f690eeaa64f401cb0ec448d`; its successful hosted run [38631871411](https://github.com/badmrfrosty313/PixelForge/actions/runs/38631871411) predates the release-preparation changes below. Verify Windows, Ubuntu, and sanitizer results on the exact candidate revision in [GitHub Actions](https://github.com/badmrfrosty313/PixelForge/actions/workflows/build.yml).
+This checklist records observed evidence, not intended behavior. At the initial audit, the Beta branch pointed to `687b4cc197670ab53f690eeaa64f401cb0ec448d`; its successful hosted run [38631871411](https://github.com/badmrfrosty313/PixelForge/actions/runs/38631871411) predates the release-preparation changes. The first final-candidate run exposed a contact-sheet resolution assumption, which was corrected in `751838443cf86e6bea9c4e01b049c9f8f7d11bd4`.
 
 ## Verified locally on the release-preparation worktree
 
@@ -13,6 +13,12 @@ This checklist records observed evidence, not intended behavior. At the initial 
 - **Screenshots:** four representative 1662×896 captures from the native app are checked into `docs/screenshots/`; they are not golden baselines.
 - **Dependency/assets:** CMake pins SDL3, Dear ImGui, nlohmann/json, and stb sources. `THIRD_PARTY_NOTICES.md`, exact dependency license texts in the Windows package, and the original atlas's CC0 notice are present. The Windows CI smoke previously launched its extracted package from a separate directory and loaded both examples.
 
+## Final hosted candidate verification
+
+The exact release-preparation head `751838443cf86e6bea9c4e01b049c9f8f7d11bd4` passed both [push run 38638860039](https://github.com/badmrfrosty313/PixelForge/actions/runs/38638860039) and [PR run 38638872191](https://github.com/badmrfrosty313/PixelForge/actions/runs/38638872191). In the push run, Windows and Ubuntu Release builds each passed all 4 CTest targets; native Visual QA completed on both platforms; and the Ubuntu ASan/UBSan job passed all 3 core CTest targets. Windows also installed the portable package, checked required files after extracting the ZIP, and passed `PixelForge.exe --smoke` from a different working directory.
+
+The Windows job produced `PixelForge-v1.0.0-windows-x64.zip` (1,970,049 bytes), SHA-256 `bd17eb533b660da8e25db59666bb6b768c37a48dca39ee8c2b09bc2b53b6f172`, plus its checksum file. The uploaded [RC artifact](https://github.com/badmrfrosty313/PixelForge/actions/runs/38638860039/artifacts/11929985732) is retained for 14 days. This artifact is a temporary CI download, not a published release.
+
 ## Human acceptance required
 
 - On Windows, launch the extracted release-candidate ZIP and check default layout, scale and resize behavior, both demos, movement/jump/collision, entity and collision editing, paint/erase, undo/redo, Save As, reopen, and dirty-document prompts.
@@ -23,10 +29,9 @@ This checklist records observed evidence, not intended behavior. At the initial 
 ## Release blockers
 
 1. **Project license approval — blocking.** There is no root `LICENSE`. The MIT text is a proposal in `proposed-MIT-license.md`; the copyright holder and selection require maintainer approval. Do not package a project license or publish until approved.
-2. **Final hosted CI — blocking.** Release-preparation commits must pass Windows and Ubuntu build, CTest, native Visual QA, and the sanitizer job.
-3. **Manual Windows acceptance — blocking for public release.** Native dialogs and interactive editing have not been verified by a person on a Windows desktop.
-4. **Visual baseline approval — non-blocking for RC review, required before enforcing screenshot diffs.** No baseline is silently accepted.
-5. **Publication approval — blocking.** PRs must be reviewed and merged in dependency order; final tag and GitHub Release require explicit maintainer authorization.
+2. **Manual Windows acceptance — blocking for public release.** Native dialogs and interactive editing have not been verified by a person on a Windows desktop.
+3. **Visual baseline approval — non-blocking for RC review, required before enforcing screenshot diffs.** No baseline is silently accepted.
+4. **Publication approval — blocking.** PRs must be reviewed and merged in dependency order; final tag and GitHub Release require explicit maintainer authorization.
 
 ## Stacked pull requests and merge plan
 
