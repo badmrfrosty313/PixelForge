@@ -20,8 +20,39 @@ jobs:
           name: PixelForge-Windows-CTest-Log
           path: build/ctest.log
           retention-days: 7
+      - name: Install portable Windows package
+        if: runner.os == 'Windows'
+        run: cmake --install build --config Release --prefix build/PixelForge-Windows
+      - name: Validate and archive Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "build/PixelForge-Windows"
+          $required = @(
+            "$package/PixelForge.exe",
+            "$package/README.md",
+            "$package/THIRD_PARTY_NOTICES.md",
+            "$package/assets/studio_tiles.png",
+            "$package/assets/LICENSE.txt",
+            "$package/examples/rpg.json",
+            "$package/examples/platformer.json",
+            "$package/licenses/SDL3-LICENSE.txt",
+            "$package/licenses/Dear-ImGui-LICENSE.txt",
+            "$package/licenses/nlohmann-json-LICENSE.txt",
+            "$package/licenses/stb-LICENSE.txt"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "Portable package is missing $path"
+            }
+          }
+          Compress-Archive -Path "$package/*" -DestinationPath "build/PixelForge-Windows.zip" -Force
+          if ((Get-Item "build/PixelForge-Windows.zip").Length -eq 0) {
+            throw "Portable package ZIP is empty"
+          }
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: PixelForge-Windows
-          path: build/Release/PixelForge.exe
+          path: build/PixelForge-Windows.zip
+          retention-days: 14

@@ -1,4 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
+cmake_policy(SET CMP0091 NEW)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 project(PixelForge VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,4 +64,16 @@ if(PIXELFORGE_EDITOR)
  target_link_libraries(PixelForge PRIVATE level gameplay editor_imgui)
  add_test(NAME editor_smoke COMMAND PixelForge --smoke)
  set_tests_properties(editor_smoke PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy" TIMEOUT 20)
+ install(TARGETS PixelForge RUNTIME DESTINATION .)
+ install(DIRECTORY assets/ DESTINATION assets)
+ install(DIRECTORY examples/ DESTINATION examples)
+ install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
+ install(FILES "${SDL3_SOURCE_DIR}/LICENSE.txt"
+         DESTINATION licenses RENAME SDL3-LICENSE.txt)
+ install(FILES "${imgui_SOURCE_DIR}/LICENSE.txt"
+         DESTINATION licenses RENAME Dear-ImGui-LICENSE.txt)
+ install(FILES "${json_SOURCE_DIR}/LICENSE.MIT"
+         DESTINATION licenses RENAME nlohmann-json-LICENSE.txt)
+ install(FILES "${stb_SOURCE_DIR}/LICENSE"
+         DESTINATION licenses RENAME stb-LICENSE.txt)
 endif()

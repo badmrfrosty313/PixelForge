@@ -13,7 +13,7 @@ ctest --test-dir build -C Release --output-on-failure
 .\build\Release\PixelForge.exe
 ```
 
-CMake FetchContent downloads pinned SDL 3.2.10, Dear ImGui 1.91.9b docking, nlohmann JSON 3.12.0, and stb_image sources from GitHub. SDL is linked statically; no separately installed SDL DLL is required. Internet and Git are needed for the first configure; build/_deps retains dependencies. Dependency licenses are in the fetched source directories. GitHub Actions builds/tests Linux and Windows and uploads the Windows executable.
+CMake FetchContent downloads pinned SDL 3.2.10, Dear ImGui 1.91.9b docking, nlohmann JSON 3.12.0, and stb_image sources from GitHub. SDL is linked statically; no separately installed SDL DLL is required. Internet and Git are needed for the first configure; build/_deps retains dependencies. Dependency licenses are in the fetched source directories. GitHub Actions builds/tests Linux and Windows and uploads a portable Windows ZIP with the executable, demos, tileset, and license notices.
 
 Linux requires GCC 12+/Clang with C++20, CMake, Git, a build tool and desktop development libraries (on Debian: libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev).
 
@@ -25,6 +25,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 On a displayless Linux host add `-DSDL_UNIX_CONSOLE_BUILD=ON` at configure; this permits an SDL build without desktop libraries. `SDL_VIDEODRIVER=dummy ./build/PixelForge --smoke` renders three frames using the real SDL/ImGui backends and exits. It does not validate interactive desktop behavior. Core-only development: configure with `-DPIXELFORGE_EDITOR=OFF`.
+
+## Windows package
+
+Download the `PixelForge-Windows` artifact from a successful GitHub Actions run and unzip it. Run `PixelForge.exe` from the package directory. The package contains `assets/studio_tiles.png`, both example levels, this README, and the license texts for the statically linked dependencies. The executable uses the statically linked MSVC runtime and SDL; no separate SDL or Visual C++ runtime installation is expected.
 
 ## Editing
 
