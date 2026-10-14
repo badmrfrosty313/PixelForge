@@ -1,6 +1,6 @@
 # PixelForge
 
-A C++20 native 2D level editor for top-down RPGs and platformers. Both genres use the same tile canvas, layer model and JSON format. The Studio Alpha branch builds on the native editing foundation with textured tiles, undoable editing, structured collision and entity data, and versioned level files. Playtest runtime is not implemented yet.
+A C++20 native 2D level editor for top-down RPGs and platformers. Both genres use the same tile canvas, layer model, and JSON format. Studio Beta builds on Alpha's textured editing, undo history, structured collision/entity data, isolated playtest runtime, and portable Windows package.
 
 ## Windows build
 
@@ -34,11 +34,11 @@ Download the `PixelForge-Windows` artifact from a successful GitHub Actions run 
 
 The editor creates maps from 1–256 cells per dimension with either `top_down_rpg` or `platformer` genre. The original procedural pixel-art PNG atlas is loaded from `assets/studio_tiles.png`; the palette lets you load another PNG and set its tile width/height. Select a palette tile and use Pencil to paint. The toolbar also provides Eraser, Rectangle, Line, Flood Fill, and Eyedropper. Pencil drag fills every crossed cell and is one undoable action. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. Grid visibility, Fit, and 100% reset are available in the toolbar. Middle-drag pans; the wheel zooms around the cursor. Panels can be docked by dragging their title bars. Layout persists in imgui.ini in the working directory.
 
-Enter a JSON path in the Tileset Palette panel and click Open or Save. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading and creating a new map prompt before discarding edits. Closing the application currently does not prompt, so save before exiting. Save overwrites the named file directly; keep backups for important maps.
+Enter a JSON path in the Tileset Palette panel and click Open or Save. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading, creating, and closing with unsaved edits offer save/discard/cancel choices as appropriate. Saves use a same-directory temporary file and replace the destination only after writing succeeds. Native file dialogs are planned for Studio Beta.
 
 The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level. The Entity tool places and moves entities; the Entities panel edits type, position, name/message properties, and deletion. The Collision tool paints an independent solid grid with an optional overlay.
 
-Click **Play** to run an isolated copy of the current level. Click the canvas to focus controls. Arrows or WASD move; Space or Up jumps in the platformer; E interacts with nearby RPG NPCs. Pause, Reset, and Stop are in the toolbar. Runtime collection, movement, and checkpoints do not modify the editor document. Ctrl+S saves, Ctrl+Shift+S saves to the path in the Level JSON field, and Ctrl+O/Ctrl+N prompt before discarding unsaved edits. Closing with unsaved edits offers Save, Discard, or Cancel. Saves write a same-directory temporary file and replace the destination only after the write succeeds.
+Click **Play** to run an isolated copy of the current level. Click the canvas to focus controls. Arrows or WASD move; Space or Up jumps in the platformer; E interacts with nearby RPG NPCs. Pause, Reset, and Stop are in the toolbar. Runtime collection, movement, and checkpoints do not modify the editor document. F3 or View → Playtest collision debug toggles collision-tile and player-hitbox outlines plus position, velocity, grounded state, support/contact information, camera position, and scale. Ctrl+S saves, Ctrl+Shift+S saves to the path in the Level JSON field, and Ctrl+O/Ctrl+N prompt before discarding unsaved edits.
 
 ## Architecture
 
@@ -57,9 +57,9 @@ Model tests cover geometry and collision bounds, v1 migration, v2 round-trips fo
 
 ## Validation and limitations
 
-Use CTest as above. The automated test programs currently report 70 model/serialization checks, 62 document/undo checks, and 24 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify entity/collision editing and run both example playtests; graphical desktop controls and visual quality are not proven by the headless smoke test.
+Use CTest as above. The automated test programs currently report 70 model/serialization checks, 62 document/undo checks, and 72 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify entity/collision editing and run both example playtests; graphical desktop controls and visual quality are not proven by the headless smoke test.
 
-No native file picker, Windows ZIP package, or genuine screenshots are included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
+Native file dialogs and genuine application screenshots are not included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
 
 ## Studio Alpha Phase 1
 
@@ -98,7 +98,7 @@ Phase 2 adds a renderer-independent entity model (player spawn, NPC, enemy, coll
 
 ## Studio Alpha Phase 3
 
-The built-in playtest runs a renderer-independent copy of the current level at a fixed 60 Hz. `TopDownController` handles normalized four-direction movement, collision, NPC interaction, and collectibles. `PlatformerController` handles horizontal movement, gravity, jumping, tile collision, checkpoints, hazards, and respawn. Both share the same bounds-solid collision world and runtime contact handling. Play, Pause, Reset, and Stop are available from the editor toolbar; see [Phase 3 design notes](docs/studio-alpha-phase3.md).
+The built-in playtest runs a renderer-independent copy of the current level at a fixed 60 Hz. `TopDownController` handles normalized four-direction movement, collision, NPC interaction, and collectibles. `PlatformerController` handles horizontal movement, gravity, jumping, tile collision, checkpoints, hazards, and respawn. Both share the same tile collision and runtime contact handling; platformer space below the map is a fall zone while the top-down map bounds remain solid. Phase 1 adds exact hitbox/tile contact resolution, visible collision diagnostics, and expanded regression tests; see [Phase 3 notes](docs/studio-alpha-phase3.md) and [Studio Beta Phase 1](docs/studio-beta-phase1-physics.md).
 
 ## Studio Alpha Phase 4
 

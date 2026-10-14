@@ -4,19 +4,32 @@
 #include <string>
 #include <vector>
 namespace pf::gameplay {
+inline constexpr float player_hitbox_width = 0.62f;
+inline constexpr float player_hitbox_height = 0.78f;
+
+struct Bounds {
+  float left = 0, top = 0, right = 0, bottom = 0;
+};
+
 struct Input {
   bool left = false, right = false, up = false, down = false, jump = false,
        interact = false;
 };
 struct Player {
+  // x/y are the hitbox center in tile units; velocity is tile units/second.
   float x = 0, y = 0, velocity_x = 0, velocity_y = 0;
   bool grounded = false;
+  int contact_normal_x = 0, contact_normal_y = 0;
+  int contact_tile_x = -1, contact_tile_y = -1;
+  int support_tile_x = -1, support_tile_y = -1;
 };
+Bounds bounds(const Player &player);
 struct World {
   int width = 0, height = 0;
   std::vector<std::uint8_t> collision;
   std::vector<Entity> entities;
   float checkpoint_x = 0.5f, checkpoint_y = 0.5f;
+  Genre genre = Genre::top_down_rpg;
   bool solid(int x, int y) const;
 };
 struct RuntimeLevel {

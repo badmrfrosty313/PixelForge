@@ -1,4 +1,5 @@
 #include "editor.hpp"
+#include "coordinates.hpp"
 #include "rendering.hpp"
 #include "serialization.hpp"
 #include <algorithm>
@@ -213,6 +214,9 @@ void Editor::toolbar() {
     if (ImGui::BeginMenu("View")) {
       if (ImGui::MenuItem("Show grid", nullptr, &grid_visible_)) {
       }
+      if (ImGui::MenuItem("Playtest collision debug", "F3",
+                          &debug_overlay_)) {
+      }
       if (ImGui::MenuItem("Fit level", "F"))
         fit_requested_ = true;
       if (ImGui::MenuItem("Reset zoom", "0")) {
@@ -240,6 +244,8 @@ void Editor::toolbar() {
         playtest_.reset();
       ImGui::SameLine();
       ImGui::Text("%s", genre_name(document_.level().genre).c_str());
+      ImGui::SameLine();
+      ImGui::Checkbox("Debug overlay", &debug_overlay_);
     } else {
       if (ImGui::Button("Play")) {
         try {
@@ -891,11 +897,14 @@ void Editor::playtest_canvas() {
   const auto &level = playtest_->visual_level();
   const auto &world = playtest_->world();
   const auto &player = playtest_->player();
+  if (focused && ImGui::IsKeyPressed(ImGuiKey_F3))
+    debug_overlay_ = !debug_overlay_;
   const float cell = std::clamp(std::min(size.x / std::min(level.width, 30),
                                          size.y / std::min(level.height, 20)),
                                 8.0f, 40.0f);
-  const ImVec2 origin(pos.x + size.x * 0.5f - player.x * cell,
-                      pos.y + size.y * 0.5f - player.y * cell);
+  const coordinates::TileCamera camera{
+      pos.x + size.x * 0.5f - player.x * cell,
+      pos.y + size.y * 0.5f - player.y * cell, cell};
   auto *draw = ImGui::GetWindowDrawList();
   draw->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), true);
   draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
@@ -909,9 +918,24 @@ void Editor::playtest_canvas() {
             layer.tiles[static_cast<std::size_t>(y * level.width + x)];
         if (tile == 0)
           continue;
-        const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
-        const ImVec2 b(a.x + cell, a.y + cell);
-        draw_tile(draw, tileset_, tile, a, b);
+        const auto a = camera.project(static_cast<float>(x),
+                                      static_cast<float>(y));
+        const auto b = camera.project(static_cast<float>(x + 1),
+                                      static_cast<float>(y + 1));
+        draw_tile(draw, tileset_, tile, ImVec2(a.x, a.y), ImVec2(b.x, b.y));
+      }
+  }
+  if (debug_overlay_) {
+    for (int y = 0; y < world.height; ++y)
+      for (int x = 0; x < world.width; ++x) {
+        if (!world.solid(x, y))
+          continue;
+        const auto a = camera.project(static_cast<float>(x),
+                                      static_cast<float>(y));
+        const auto b = camera.project(static_cast<float>(x + 1),
+                                      static_cast<float>(y + 1));
+        draw->AddRect(ImVec2(a.x, a.y), ImVec2(b.x, b.y),
+                      IM_COL32(255, 96, 72, 210), 0, 0, 1.5f);
       }
   }
   for (const auto &entity : world.entities) {
@@ -920,8 +944,8 @@ void Editor::playtest_canvas() {
         entity.type == EntityType::npc || entity.type == EntityType::hazard ||
         entity.type == EntityType::checkpoint ||
         entity.type == EntityType::trigger) {
-      const ImVec2 center(origin.x + entity.x * cell,
-                          origin.y + entity.y * cell);
+      const auto projected = camera.project(entity.x, entity.y);
+      const ImVec2 center(projected.x, projected.y);
       const ImU32 color =
           entity.type == EntityType::npc           ? IM_COL32(80, 170, 255, 255)
           : entity.type == EntityType::collectible ? IM_COL32(255, 215, 80, 255)
@@ -930,12 +954,49 @@ void Editor::playtest_canvas() {
       draw->AddCircleFilled(center, std::max(5.0f, cell * 0.22f), color);
     }
   }
-  const ImVec2 player_center(origin.x + player.x * cell,
-                             origin.y + player.y * cell);
-  draw->AddRectFilled(
-      ImVec2(player_center.x - cell * 0.28f, player_center.y - cell * 0.36f),
-      ImVec2(player_center.x + cell * 0.28f, player_center.y + cell * 0.36f),
-      IM_COL32(80, 235, 145, 255), 3.0f);
+  const auto player_bounds = gameplay::bounds(player);
+  const auto player_rect = camera.project(
+      player_bounds.left, player_bounds.top, player_bounds.right,
+      player_bounds.bottom);
+  draw->AddRectFilled(ImVec2(player_rect.left, player_rect.top),
+                      ImVec2(player_rect.right, player_rect.bottom),
+                      IM_COL32(80, 235, 145, 255), 3.0f);
+  if (debug_overlay_) {
+    draw->AddRect(ImVec2(player_rect.left, player_rect.top),
+                  ImVec2(player_rect.right, player_rect.bottom),
+                  IM_COL32(255, 255, 255, 255), 0, 0, 2.0f);
+    char details[512];
+    const char *mode = level.genre == Genre::platformer ? "platformer"
+                                                        : "top_down_rpg";
+    char support_text[64], contact_text[64];
+    if (player.support_tile_x >= 0)
+      std::snprintf(support_text, sizeof(support_text), "tile (%d, %d)",
+                    player.support_tile_x, player.support_tile_y);
+    else
+      std::snprintf(support_text, sizeof(support_text), "none");
+    if (player.contact_tile_x >= 0)
+      std::snprintf(contact_text, sizeof(contact_text), "tile (%d, %d)",
+                    player.contact_tile_x, player.contact_tile_y);
+    else
+      std::snprintf(contact_text, sizeof(contact_text), "none");
+    std::snprintf(details, sizeof(details),
+                  "Mode: %s\nPosition: %.3f, %.3f\nVelocity: %.3f, %.3f\n"
+                  "Grounded: %s\nSupport: %s\nContact: %s\n"
+                  "Normals: (%d, %d)\nCamera origin: %.1f, %.1f\n"
+                  "Scale: %.1f px/tile",
+                  mode, player.x, player.y, player.velocity_x,
+                  player.velocity_y, player.grounded ? "yes" : "no",
+                  support_text, contact_text, player.contact_normal_x,
+                  player.contact_normal_y, camera.origin_x, camera.origin_y,
+                  camera.pixels_per_tile);
+    const ImVec2 text_size = ImGui::CalcTextSize(details);
+    const ImVec2 box(pos.x + 8, pos.y + 54);
+    draw->AddRectFilled(box, ImVec2(box.x + text_size.x + 18,
+                                    box.y + text_size.y + 14),
+                        IM_COL32(10, 14, 18, 220), 4.0f);
+    draw->AddText(ImVec2(box.x + 9, box.y + 7), IM_COL32(220, 240, 255, 255),
+                  details);
+  }
   draw->AddText(ImVec2(pos.x + 10, pos.y + 10), IM_COL32_WHITE,
                 playtest_->paused()
                     ? "Paused"

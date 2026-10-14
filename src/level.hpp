@@ -22,6 +22,7 @@ EntityType parse_entity_type(const std::string &name);
 struct Entity {
   std::uint64_t id = 0;
   EntityType type = EntityType::npc;
+  // Entity positions are tile-unit centers, matching gameplay::Player.
   float x = 0, y = 0;
   std::map<std::string, nlohmann::json> properties;
   bool operator==(const Entity &) const = default;

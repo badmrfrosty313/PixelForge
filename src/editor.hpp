@@ -34,7 +34,7 @@ class Editor {
   bool grid_visible_ = true, stroke_active_ = false, gesture_active_ = false,
        fit_requested_ = false;
   bool collision_visible_ = false, collision_stroke_active_ = false,
-       entity_drag_active_ = false;
+       entity_drag_active_ = false, debug_overlay_ = false;
   bool collision_value_ = true;
   std::uint64_t selected_entity_id_ = 0, entity_drag_id_ = 0;
   float entity_x_ = 0, entity_y_ = 0, entity_drag_x_ = 0, entity_drag_y_ = 0;
