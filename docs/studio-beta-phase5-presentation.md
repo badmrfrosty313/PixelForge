@@ -1,0 +1,7 @@
+# Studio Beta Phase 5: Playtest presentation
+
+The prior playtest drew the player as a green rectangle and world entities as colored circles. The player is now rendered as a small original pixel-style explorer built from renderer primitives. Its sprite stays inside the same 0.62 × 0.78 tile-unit bounds used by collision, is aligned at the hitbox foot, faces the last movement direction, breathes in a subtle idle cycle, cycles a two-frame walk motion, and changes its leg pose while rising or falling. The collision outline remains available in the debug overlay.
+
+Runtime entity markers use readable silhouettes: a flag for spawn, a person for NPCs, an accented foe for enemies, a faceted crystal for collectibles, a green checkpoint pennant, red spikes for hazards, and a framed marker for triggers. These are runtime visuals; the editor keeps its smaller colored placement markers so gameplay art and authoring affordances remain distinct. RPGs show a contextual E-to-talk prompt near an NPC.
+
+All new visuals are source-drawn, so no third-party image or font files were added. Gameplay tests cover direction/facing state along with the existing interaction, collision, and example progression checks. The SDL dummy-driver smoke test draws Welcome, loads both example levels through the executable-relative asset path, starts both real playtest sessions, and submits the sprite/entity drawing geometry at multiple window sizes. Visually assessing art scale, silhouette, and playtest feel still requires a desktop session.

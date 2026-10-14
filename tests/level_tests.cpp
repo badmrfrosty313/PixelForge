@@ -1,4 +1,5 @@
 #include "serialization.hpp"
+#include "asset_paths.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -6,10 +7,12 @@
 #include <stdexcept>
 namespace {
 int checks = 0;
-void check(bool ok) {
+void check(bool ok, const char *message = nullptr) {
   ++checks;
   if (!ok)
-    throw std::runtime_error("Check failed: " + std::to_string(checks));
+    throw std::runtime_error(message ? message
+                                     : "Check failed: " +
+                                           std::to_string(checks));
 }
 template <class F> void rejects(F f) {
   bool caught = false;
@@ -146,6 +149,76 @@ int main(int argc, char **argv) {
     const auto failure_target =
         std::filesystem::temp_directory_path() / "pixelforge-save-failure";
     std::filesystem::remove_all(failure_target);
+
+    const auto asset_root =
+        std::filesystem::temp_directory_path() / "pixelforge-asset-path-tests";
+    std::filesystem::remove_all(asset_root);
+    const auto doc_dir = asset_root / "maps";
+    const auto resource_dir = asset_root / "resources";
+    const auto source_dir = asset_root / "picked";
+    std::filesystem::create_directories(doc_dir / "assets");
+    std::filesystem::create_directories(resource_dir / "assets");
+    std::filesystem::create_directories(source_dir);
+    const auto doc_file = doc_dir / "sample.json";
+    const auto local_asset = doc_dir / "assets/atlas.png";
+    const auto bundled_asset = resource_dir / "assets/atlas.png";
+    const auto source_asset = source_dir / "import.png";
+    auto write_marker = [](const std::filesystem::path &path,
+                           const char *value) {
+      std::ofstream file(path, std::ios::binary);
+      file << value;
+    };
+    write_marker(local_asset, "document atlas");
+    write_marker(bundled_asset, "bundled atlas");
+    write_marker(source_asset, "picked atlas");
+    check(std::filesystem::equivalent(
+              resolve_asset_path("assets/atlas.png", doc_file, resource_dir),
+              local_asset),
+          "document-relative assets resolve beside the document first");
+    std::filesystem::remove(local_asset);
+    check(std::filesystem::equivalent(
+              resolve_asset_path("assets/atlas.png", doc_file, resource_dir),
+              bundled_asset),
+          "bundled resources resolve from the explicit resource root");
+    const auto copied_reference = ensure_document_asset(
+        source_asset, doc_file, "assets/import.png");
+    check(copied_reference == "assets/import.png" &&
+              std::filesystem::exists(doc_dir / copied_reference),
+          "selected assets are copied beside the document portably");
+    const auto conflicting_asset = doc_dir / "assets/conflict.png";
+    write_marker(conflicting_asset, "keep existing atlas");
+    const auto conflict_reference = ensure_document_asset(
+        source_asset, doc_file, "assets/conflict.png");
+    check(conflict_reference == "assets/conflict-1.png" &&
+              std::filesystem::exists(doc_dir / conflict_reference),
+          "asset imports avoid overwriting an existing document asset");
+    {
+      std::ifstream file(conflicting_asset, std::ios::binary);
+      std::string content;
+      std::getline(file, content);
+      check(content == "keep existing atlas",
+            "asset import preserves an existing conflicting file");
+    }
+    rejects([&] {
+      ensure_document_asset(source_asset, doc_file, "../outside.png");
+    });
+    rejects([&] {
+      resolve_asset_path("/outside.png", doc_file, resource_dir);
+    });
+    rejects([&] {
+      resolve_asset_path("C:/outside.png", doc_file, resource_dir);
+    });
+    rejects([&] {
+      resolve_asset_path("\\\\server\\share\\atlas.png", doc_file,
+                         resource_dir);
+    });
+    rejects([&] {
+      resolve_asset_path("assets/../../outside.png", doc_file, resource_dir);
+    });
+    rejects([&] {
+      resolve_asset_path("assets/missing.png", doc_file, resource_dir);
+    });
+    std::filesystem::remove_all(asset_root);
     std::filesystem::create_directory(failure_target);
     const auto marker = failure_target / "preserved.txt";
     {

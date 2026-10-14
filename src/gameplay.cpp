@@ -4,8 +4,6 @@
 #include <stdexcept>
 namespace pf::gameplay {
 namespace {
-constexpr float actor_width = 0.62f;
-constexpr float actor_height = 0.78f;
 constexpr float rpg_speed = 4.0f;
 constexpr float platform_speed = 5.0f;
 constexpr float gravity = 18.0f;
@@ -25,34 +23,58 @@ std::string property_string(const Entity &entity, const std::string &key,
 bool overlaps(const Player &p, const Entity &e) {
   return std::abs(p.x - e.x) < 0.55f && std::abs(p.y - e.y) < 0.65f;
 }
-bool blocked(const World &world, float x, float y, float width, float height) {
+bool blocked(const World &world, float x, float y, float width, float height,
+             int &tile_x, int &tile_y) {
   const int left = static_cast<int>(std::floor(x - width * 0.5f + 0.001f));
   const int right = static_cast<int>(std::floor(x + width * 0.5f - 0.001f));
   const int top = static_cast<int>(std::floor(y - height * 0.5f + 0.001f));
   const int bottom = static_cast<int>(std::floor(y + height * 0.5f - 0.001f));
   for (int cy = top; cy <= bottom; ++cy)
     for (int cx = left; cx <= right; ++cx)
-      if (world.solid(cx, cy))
+      if (world.solid(cx, cy)) {
+        tile_x = cx;
+        tile_y = cy;
         return true;
+      }
   return false;
 }
 void move_axis(const World &world, Player &player, float delta,
                bool horizontal) {
-  const float size = horizontal ? actor_width : actor_height;
   const int steps =
       std::max(1, static_cast<int>(std::ceil(std::abs(delta) / 0.2f)));
   const float increment = delta / steps;
   for (int i = 0; i < steps; ++i) {
     const float x = player.x + (horizontal ? increment : 0);
     const float y = player.y + (horizontal ? 0 : increment);
-    if (blocked(world, x, y, horizontal ? size : actor_width,
-                horizontal ? actor_height : size)) {
+    int tile_x = -1, tile_y = -1;
+    if (blocked(world, x, y, player_hitbox_width, player_hitbox_height,
+                tile_x, tile_y)) {
+      if (horizontal) {
+        const float half_width = player_hitbox_width * 0.5f;
+        player.x = increment > 0 ? tile_x - half_width
+                                 : tile_x + 1.0f + half_width;
+      } else {
+        const float half_height = player_hitbox_height * 0.5f;
+        player.y = increment > 0 ? tile_y - half_height
+                                 : tile_y + 1.0f + half_height;
+      }
       if (!horizontal && increment > 0)
         player.grounded = true;
       if (horizontal)
-        player.velocity_x = 0;
+        player.contact_normal_x = increment > 0 ? -1 : 1;
       else
+        player.contact_normal_y = increment > 0 ? -1 : 1;
+      player.contact_tile_x = tile_x;
+      player.contact_tile_y = tile_y;
+      if (horizontal) {
+        player.velocity_x = 0;
+      } else {
         player.velocity_y = 0;
+        if (increment > 0) {
+          player.support_tile_x = tile_x;
+          player.support_tile_y = tile_y;
+        }
+      }
       break;
     }
     player.x = x;
@@ -66,6 +88,10 @@ void respawn(World &world, Player &player) {
   player.y = world.checkpoint_y;
   player.velocity_x = player.velocity_y = 0;
   player.grounded = false;
+  player.moving = false;
+  player.contact_normal_x = player.contact_normal_y = 0;
+  player.contact_tile_x = player.contact_tile_y = -1;
+  player.support_tile_x = player.support_tile_y = -1;
 }
 void collect_touching(World &world, const Player &player,
                       std::string &message) {
@@ -96,9 +122,17 @@ void resolve_contacts(World &world, Player &player, std::string &message) {
   collect_touching(world, player, message);
 }
 } // namespace
+Bounds bounds(const Player &player) {
+  const float half_width = player_hitbox_width * 0.5f;
+  const float half_height = player_hitbox_height * 0.5f;
+  return {player.x - half_width, player.y - half_height,
+          player.x + half_width, player.y + half_height};
+}
 bool World::solid(int x, int y) const {
-  if (x < 0 || y < 0 || x >= width || y >= height)
+  if (x < 0 || y < 0 || x >= width)
     return true;
+  if (y >= height)
+    return genre != Genre::platformer;
   return collision.at(static_cast<std::size_t>(y * width + x)) != 0;
 }
 RuntimeLevel make_runtime_level(const Level &level) {
@@ -106,6 +140,7 @@ RuntimeLevel make_runtime_level(const Level &level) {
   RuntimeLevel result{level, {}};
   result.world.width = level.width;
   result.world.height = level.height;
+  result.world.genre = level.genre;
   result.world.collision = level.collision;
   result.world.entities = level.entities;
   const auto spawn = std::find_if(
@@ -119,10 +154,25 @@ RuntimeLevel make_runtime_level(const Level &level) {
 }
 void TopDownController::step(World &world, Player &player, const Input &input,
                              float dt, std::string &message) {
+  player.grounded = false;
+  player.contact_normal_x = player.contact_normal_y = 0;
+  player.contact_tile_x = player.contact_tile_y = -1;
+  player.support_tile_x = player.support_tile_y = -1;
   float dx = static_cast<float>(input.right) - static_cast<float>(input.left);
   float dy = static_cast<float>(input.down) - static_cast<float>(input.up);
   const float length = std::sqrt(dx * dx + dy * dy);
+  player.moving = length > 0.0f;
   if (length > 0) {
+    if (dx != 0.0f) {
+      player.facing_x = dx > 0.0f ? 1 : -1;
+      if (dy == 0.0f)
+        player.facing_y = 0;
+    }
+    if (dy != 0.0f) {
+      player.facing_y = dy > 0.0f ? 1 : -1;
+      if (dx == 0.0f)
+        player.facing_x = 0;
+    }
     dx /= length;
     dy /= length;
   }
@@ -148,9 +198,17 @@ void TopDownController::step(World &world, Player &player, const Input &input,
 void PlatformerController::step(World &world, Player &player,
                                 const Input &input, float dt,
                                 std::string &message) {
+  player.contact_normal_x = player.contact_normal_y = 0;
+  player.contact_tile_x = player.contact_tile_y = -1;
+  player.support_tile_x = player.support_tile_y = -1;
   player.velocity_x =
       (static_cast<float>(input.right) - static_cast<float>(input.left)) *
       platform_speed;
+  player.moving = player.velocity_x != 0.0f;
+  if (player.moving) {
+    player.facing_x = player.velocity_x > 0.0f ? 1 : -1;
+    player.facing_y = 0;
+  }
   if (input.jump && player.grounded) {
     player.velocity_y = -jump_speed;
     player.grounded = false;
@@ -159,7 +217,7 @@ void PlatformerController::step(World &world, Player &player,
   move_axis(world, player, player.velocity_x * dt, true);
   player.grounded = false;
   move_axis(world, player, player.velocity_y * dt, false);
-  if (player.y > world.height + 1) {
+  if (player.y - player_hitbox_height * 0.5f > world.height) {
     respawn(world, player);
     message = "Fell; respawned";
   } else

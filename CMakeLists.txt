@@ -1,14 +1,15 @@
 cmake_minimum_required(VERSION 3.24)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-project(PixelForge VERSION 0.1.0 LANGUAGES CXX)
+project(PixelForge VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 option(PIXELFORGE_EDITOR "Build native editor" ON)
 FetchContent_Declare(json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG 55f93686c01528224f448c19128836e7df245f72)
 FetchContent_MakeAvailable(json)
-add_library(level src/level.cpp src/serialization.cpp src/document.cpp)
+add_library(level src/level.cpp src/serialization.cpp src/document.cpp
+                 src/asset_paths.cpp)
 target_include_directories(level PUBLIC src)
 target_link_libraries(level PUBLIC nlohmann_json::nlohmann_json)
 add_library(gameplay src/gameplay.cpp)
@@ -64,10 +65,40 @@ if(PIXELFORGE_EDITOR)
  target_link_libraries(PixelForge PRIVATE level gameplay editor_imgui)
  add_test(NAME editor_smoke COMMAND PixelForge --smoke)
  set_tests_properties(editor_smoke PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy" TIMEOUT 20)
+ function(add_editor_interaction_test test_name scenario)
+  add_test(NAME ${test_name}
+           COMMAND PixelForge --interaction-test ${scenario} ${ARGN})
+  set_tests_properties(${test_name} PROPERTIES
+                       ENVIRONMENT "SDL_VIDEODRIVER=dummy" TIMEOUT 20)
+ endfunction()
+ add_editor_interaction_test(editor_transition_rpg transition-rpg
+                             --output-dir "${CMAKE_BINARY_DIR}/interaction-qa/rpg")
+ add_editor_interaction_test(editor_transition_platformer transition-platformer
+                             --output-dir "${CMAKE_BINARY_DIR}/interaction-qa/platformer")
+ add_editor_interaction_test(editor_exit_file_clean exit-file-clean)
+ add_editor_interaction_test(editor_exit_window_clean exit-window-clean)
+ add_editor_interaction_test(editor_exit_playtest exit-playtest)
+ add_editor_interaction_test(editor_exit_file_dirty_cancel file-dirty-cancel)
+ add_editor_interaction_test(editor_exit_window_dirty_cancel window-dirty-cancel)
+ add_editor_interaction_test(editor_exit_window_dirty_discard window-dirty-discard)
+ add_editor_interaction_test(editor_exit_file_dirty_save file-dirty-save)
+ add_editor_interaction_test(editor_exit_window_dirty_save window-dirty-save)
+ add_editor_interaction_test(editor_exit_playtest_dirty_discard dirty-playtest-discard)
+ add_editor_interaction_test(editor_cancel_save_dialog save-dialog-cancel)
+ find_package(Python3 COMPONENTS Interpreter REQUIRED)
+ add_custom_target(visual_qa
+   COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_visual_qa.py"
+           --binary "$<TARGET_FILE:PixelForge>" --output-dir "${CMAKE_BINARY_DIR}/visual-qa"
+   COMMAND $<TARGET_FILE:gameplay_tests> "${CMAKE_CURRENT_SOURCE_DIR}/examples" "${CMAKE_BINARY_DIR}/visual-qa/gameplay-unit-report.json"
+   DEPENDS PixelForge gameplay_tests
+   USES_TERMINAL
+   COMMENT "Capturing SDL/ImGui visual QA and deterministic demo gameplay reports")
  install(TARGETS PixelForge RUNTIME DESTINATION .)
  install(DIRECTORY assets/ DESTINATION assets)
  install(DIRECTORY examples/ DESTINATION examples)
- install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
+ install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md DESTINATION .)
+ install(FILES docs/release-readiness.md docs/release-notes-v1.0.0.md DESTINATION docs)
+ install(DIRECTORY docs/screenshots/ DESTINATION docs/screenshots)
  install(FILES "${SDL3_SOURCE_DIR}/LICENSE.txt"
          DESTINATION licenses RENAME SDL3-LICENSE.txt)
  install(FILES "${imgui_SOURCE_DIR}/LICENSE.txt"

@@ -1,4 +1,6 @@
 #include "editor.hpp"
+#include "asset_paths.hpp"
+#include "coordinates.hpp"
 #include "rendering.hpp"
 #include "serialization.hpp"
 #include <algorithm>
@@ -6,10 +8,64 @@
 #include <cstdio>
 #include <cstring>
 #include <imgui.h>
+#include <imgui_impl_sdlrenderer3.h>
+#include <imgui_internal.h>
+#include <SDL3/SDL_dialog.h>
+#include <cctype>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 namespace pf {
+struct DialogMailbox {
+  struct Result {
+    int action = 0;
+    std::filesystem::path path;
+    std::string error;
+    bool canceled = false;
+  };
+  std::mutex mutex;
+  std::optional<Result> result;
+};
 namespace {
+bool horizontally_clipped(float min_x, float max_x, float clip_min_x,
+                          float clip_max_x) {
+  return min_x < clip_min_x - 1.0f || max_x > clip_max_x + 1.0f;
+}
+std::string path_text(const std::filesystem::path &path) {
+  const auto encoded = path.u8string();
+  return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
+}
+enum class DialogAction : int { open_level, save_level, import_tileset };
+struct DialogTicket {
+  std::weak_ptr<DialogMailbox> mailbox;
+  DialogAction action;
+};
+const SDL_DialogFileFilter level_filter[] = {{"PixelForge levels", "json"}};
+const SDL_DialogFileFilter tileset_filter[] = {{"PNG image", "png"}};
+
+void SDLCALL file_dialog_callback(void *userdata,
+                                  const char *const *filelist, int) {
+  std::unique_ptr<DialogTicket> ticket(
+      static_cast<DialogTicket *>(userdata));
+  auto mailbox = ticket->mailbox.lock();
+  if (!mailbox)
+    return;
+  DialogMailbox::Result result;
+  result.action = static_cast<int>(ticket->action);
+  if (!filelist)
+    result.error = SDL_GetError();
+  else if (!filelist[0])
+    result.canceled = true;
+  else {
+    const auto *begin = reinterpret_cast<const char8_t *>(filelist[0]);
+    result.path = std::filesystem::path(
+        std::u8string(begin, begin + std::strlen(filelist[0])));
+  }
+  std::lock_guard lock(mailbox->mutex);
+  mailbox->result = std::move(result);
+}
+
 const char *tool_name(Tool t) {
   switch (t) {
   case Tool::pencil:
@@ -32,26 +88,309 @@ const char *tool_name(Tool t) {
   return "Tool";
 }
 } // namespace
-Editor::Editor(SDL_Renderer *renderer) : renderer_(renderer) {
-  std::filesystem::path default_path =
-      std::filesystem::current_path() / "assets/studio_tiles.png";
-  if (!std::filesystem::exists(default_path)) {
-    const char *executable_base = SDL_GetBasePath();
-    if (executable_base && *executable_base) {
-      const auto executable_path =
-          std::filesystem::path(executable_base) / "assets/studio_tiles.png";
-      if (std::filesystem::exists(executable_path))
-        default_path = executable_path;
-    }
-    if (!std::filesystem::exists(default_path))
-      default_path = std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR) /
-                     "studio_tiles.png";
-  }
+Editor::Editor(SDL_Renderer *renderer, float display_scale)
+    : renderer_(renderer), base_style_(ImGui::GetStyle()),
+      dialog_mailbox_(std::make_shared<DialogMailbox>()) {
+  set_display_scale(display_scale);
+  const char *executable_base = SDL_GetBasePath();
+  if (executable_base && *executable_base &&
+      std::filesystem::exists(std::filesystem::path(executable_base) /
+                              "assets/studio_tiles.png"))
+    resource_root_ = std::filesystem::path(executable_base);
+  else
+    resource_root_ =
+        std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR).parent_path();
+  const auto default_path = resource_root_ / "assets/studio_tiles.png";
   try {
     tileset_.load(renderer_, default_path, tile_width_, tile_height_);
     status_ = "Loaded original Studio tileset";
   } catch (const std::exception &e) {
     status_ = e.what();
+  }
+}
+void Editor::apply_ui_scale(int percent) {
+  static constexpr int presets[] = {100, 125, 150, 200};
+  const int *selected = std::min_element(
+      std::begin(presets), std::end(presets), [percent](int a, int b) {
+        return std::abs(a - percent) < std::abs(b - percent);
+      });
+  const int previous_scale = ui_scale_percent_;
+  ui_scale_percent_ = *selected;
+  if (previous_scale != ui_scale_percent_)
+    reset_layout_requested_ = true;
+  const float scale = static_cast<float>(ui_scale_percent_) / 100.0f;
+  ImGui::GetStyle() = base_style_;
+  ImGui::GetStyle().ScaleAllSizes(scale);
+  // Dear ImGui/SDL coordinates remain logical pixels; only font and style
+  // metrics scale, so canvas mouse-to-world calculations do not change.
+  auto &io = ImGui::GetIO();
+  ImGui_ImplSDLRenderer3_DestroyFontsTexture();
+  io.Fonts->Clear();
+  ImFontConfig font_config;
+  font_config.SizePixels = 16.0f * scale;
+  font_config.OversampleH = 2;
+  font_config.OversampleV = 1;
+  io.FontDefault = io.Fonts->AddFontDefault(&font_config);
+  font_config.SizePixels = 14.0f * scale;
+  status_font_ = io.Fonts->AddFontDefault(&font_config);
+  if (!io.Fonts->Build() || !ImGui_ImplSDLRenderer3_CreateFontsTexture())
+    throw std::runtime_error("Cannot rebuild the scaled UI font atlas");
+  io.FontGlobalScale = 1.0f;
+}
+void Editor::set_display_scale(float scale) {
+  const int target = static_cast<int>(std::lround(
+      std::clamp(scale, 1.0f, 2.0f) * 100.0f));
+  apply_ui_scale(target);
+}
+void Editor::start_smoke_playtest(Genre genre) {
+  stop_playtest();
+  const auto filename = genre == Genre::top_down_rpg ? "rpg.json"
+                                                       : "platformer.json";
+  const auto sample = std::filesystem::absolute(resource_root_ / "examples" /
+                                                 filename)
+                          .lexically_normal();
+  open_path(sample);
+  if (document_path_ != sample)
+    throw std::runtime_error("Cannot load the packaged playtest example");
+  playtest_ = std::make_unique<gameplay::Session>(document_.level());
+  last_playtest_frame_ = std::chrono::steady_clock::now();
+  focus_canvas_ = true;
+}
+void Editor::stop_playtest() {
+  playtest_.reset();
+  focus_canvas_ = true;
+}
+void Editor::visual_load_demo(Genre genre, bool playtest) {
+  show_welcome_ = false;
+  if (playtest) {
+    start_smoke_playtest(genre);
+    return;
+  }
+  stop_playtest();
+  const auto filename = genre == Genre::top_down_rpg ? "rpg.json"
+                                                       : "platformer.json";
+  open_path(resource_root_ / "examples" / filename);
+  if (document_path_.filename() != filename)
+    throw std::runtime_error("Visual QA could not load bundled demo");
+}
+void Editor::visual_create_large_map() {
+  stop_playtest();
+  show_welcome_ = false;
+  Level level(Genre::top_down_rpg, 128, 96);
+  for (int y = 0; y < level.height; ++y)
+    for (int x = 0; x < level.width; ++x)
+      if (x == 0 || y == 0 || x == level.width - 1 || y == level.height - 1)
+        level.paint(0, x, y, 1);
+  document_ = Document(std::move(level));
+  document_path_.clear();
+  active_layer_ = 0;
+  fit_requested_ = true;
+  status_ = "Large map fit to canvas";
+}
+void Editor::visual_select_entity(std::uint64_t id) {
+  const auto &entities = document_.level().entities;
+  const auto it = std::find_if(entities.begin(), entities.end(),
+                               [id](const Entity &entity) { return entity.id == id; });
+  if (it == entities.end())
+    throw std::runtime_error("Visual QA entity selection was not found");
+  selected_entity_id_ = id;
+  sync_entity_fields();
+}
+void Editor::visual_step_gameplay(const gameplay::Input &input, int steps) {
+  if (!playtest_)
+    throw std::runtime_error("Visual gameplay scenario needs an active playtest");
+  for (int i = 0; i < steps; ++i)
+    playtest_->step(input);
+}
+void Editor::visual_load_path(const std::filesystem::path &path) {
+  show_welcome_ = false;
+  open_path(path);
+}
+void Editor::visual_cancel_pending_dialog_for_test() {
+  if (!interaction_test_mode_ || !dialog_pending_)
+    throw std::logic_error("No interaction-test file dialog is pending");
+  DialogMailbox::Result result;
+  result.action = static_cast<int>(DialogAction::save_level);
+  result.canceled = true;
+  std::lock_guard lock(dialog_mailbox_->mutex);
+  dialog_mailbox_->result = std::move(result);
+}
+const gameplay::Player &Editor::visual_player() const {
+  if (!playtest_)
+    throw std::runtime_error("Visual gameplay scenario has no player");
+  return playtest_->player();
+}
+const std::string &Editor::visual_gameplay_message() const {
+  if (!playtest_)
+    throw std::runtime_error("Visual gameplay scenario has no session");
+  return playtest_->message();
+}
+void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
+  const ImGuiDockNode *existing = ImGui::DockBuilderGetNode(dockspace_id);
+  if (!force && existing &&
+      (existing->IsSplitNode() || existing->Windows.Size > 0))
+    return;
+
+  const ImGuiViewport *viewport = ImGui::GetMainViewport();
+  ImGui::DockBuilderRemoveNode(dockspace_id);
+  ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+  ImGui::DockBuilderSetNodePos(dockspace_id, viewport->WorkPos);
+  ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+  ImGuiID center = dockspace_id, left = 0, right = 0, bottom = 0, top = 0;
+  const bool large_ui = ui_scale_percent_ >= 150;
+  const bool compact_viewport = viewport->WorkSize.x < 1400.0f;
+  const float side_width = large_ui
+                               ? (compact_viewport ? 0.30f : 0.25f)
+                               : (compact_viewport ? 0.24f : 0.21f);
+  const float right_width = large_ui
+                                ? (compact_viewport ? 0.32f : 0.29f)
+                                : 0.25f;
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,
+                              large_ui ? 0.20f : 0.15f, &top, &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,
+                              large_ui ? 0.26f : 0.20f, &bottom, &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, side_width, &left,
+                              &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, right_width, &right,
+                              &center);
+  ImGuiID layers = 0, entities = 0;
+  ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.48f, &entities,
+                              &layers);
+
+  ImGui::DockBuilderDockWindow("Toolbar", top);
+  ImGui::DockBuilderDockWindow("Tileset Palette", left);
+  ImGui::DockBuilderDockWindow("Layers", layers);
+  ImGui::DockBuilderDockWindow("Entities", entities);
+  ImGui::DockBuilderDockWindow("Level Canvas", center);
+  ImGui::DockBuilderDockWindow("Playtest", center);
+  ImGui::DockBuilderDockWindow("Status", bottom);
+  ImGui::DockBuilderFinish(dockspace_id);
+  reset_layout_requested_ = false;
+  focus_canvas_ = true;
+}
+void Editor::request_open_dialog() {
+  if (dialog_pending_)
+    return;
+  auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::open_level};
+  dialog_pending_ = true;
+  SDL_ShowOpenFileDialog(file_dialog_callback, ticket,
+                         SDL_GetRenderWindow(renderer_),
+                         level_filter, 1, nullptr, false);
+}
+void Editor::request_save_dialog(SaveIntent intent) {
+  if (dialog_pending_)
+    return;
+  save_intent_ = intent;
+  if (interaction_test_mode_) {
+    dialog_pending_ = true;
+    return;
+  }
+  auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::save_level};
+  dialog_pending_ = true;
+  SDL_ShowSaveFileDialog(file_dialog_callback, ticket,
+                         SDL_GetRenderWindow(renderer_),
+                         level_filter, 1, nullptr);
+}
+void Editor::request_tileset_dialog() {
+  if (dialog_pending_)
+    return;
+  auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::import_tileset};
+  dialog_pending_ = true;
+  SDL_ShowOpenFileDialog(file_dialog_callback, ticket,
+                         SDL_GetRenderWindow(renderer_),
+                         tileset_filter, 1, nullptr, false);
+}
+void Editor::report_error(const std::string &message) {
+  status_ = message;
+  error_message_ = message;
+  error_popup_pending_ = true;
+}
+void Editor::record_visual_control(const char *label) {
+  ImGuiWindow *window = ImGui::GetCurrentWindow();
+  if (!window || !ImGui::GetCurrentContext()->WithinFrameScope)
+    return;
+  const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+  const ImRect clip = window->InnerClipRect;
+  const bool clipped_vertically = min.y < clip.Min.y - 1.0f ||
+                                   max.y > clip.Max.y + 1.0f;
+  bool vertically_scrollable = false;
+  for (const ImGuiWindow *parent = window; parent; parent = parent->ParentWindow)
+    vertically_scrollable = vertically_scrollable ||
+                            (parent->ScrollMax.y > 0.0f &&
+                             !(parent->Flags & ImGuiWindowFlags_NoScrollbar));
+  visual_controls_.push_back({window->Name, label,
+                              {min.x, min.y, max.x, max.y},
+                              {clip.Min.x, clip.Min.y, clip.Max.x, clip.Max.y},
+                              ImGui::IsItemVisible(),
+                              horizontally_clipped(min.x, max.x, clip.Min.x,
+                                                   clip.Max.x),
+                              clipped_vertically, vertically_scrollable});
+}
+bool Editor::visual_overflow_probe() noexcept {
+  return horizontally_clipped(95.0f, 110.0f, 0.0f, 100.0f);
+}
+void Editor::poll_dialog_result() {
+  std::optional<DialogMailbox::Result> result;
+  {
+    std::lock_guard lock(dialog_mailbox_->mutex);
+    if (!dialog_mailbox_->result)
+      return;
+    result = std::move(dialog_mailbox_->result);
+    dialog_mailbox_->result.reset();
+  }
+  dialog_pending_ = false;
+  if (!result->error.empty()) {
+    save_intent_ = SaveIntent::none;
+    report_error("File dialog failed: " + result->error);
+    return;
+  }
+  if (result->canceled) {
+    if (save_intent_ == SaveIntent::open_level)
+      pending_open_path_.clear();
+    save_intent_ = SaveIntent::none;
+    status_ = "File selection canceled";
+    return;
+  }
+  const auto selected = std::filesystem::absolute(result->path).lexically_normal();
+  const auto action = static_cast<DialogAction>(result->action);
+  if (action == DialogAction::open_level) {
+    pending_open_path_ = selected;
+    if (document_.dirty())
+      confirm_open_ = true;
+    else
+      open_path(selected);
+  } else if (action == DialogAction::import_tileset) {
+    import_tileset(selected);
+  } else {
+    auto target = selected;
+    if (target.extension().empty())
+      target += ".json";
+    auto extension = target.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (extension != ".json") {
+      save_intent_ = SaveIntent::none;
+      report_error("PixelForge levels must use the .json extension");
+      return;
+    }
+    const auto intent = save_intent_;
+    save_intent_ = SaveIntent::none;
+    if (save_level_to(target)) {
+      if (intent == SaveIntent::create_new) {
+        new_level();
+        show_welcome_ = false;
+        close_new_popup_ = true;
+      } else if (intent == SaveIntent::open_level) {
+        open_path(pending_open_path_);
+        pending_open_path_.clear();
+        close_open_popup_ = true;
+      } else if (intent == SaveIntent::close_application) {
+        close_requested_ = true;
+      }
+    }
   }
 }
 void Editor::set_active_layer(int index) {
@@ -63,96 +402,113 @@ void Editor::mark_dirty_status() {
     status_ = "Modified";
 }
 bool Editor::save_level() {
+  if (document_path_.empty()) {
+    request_save_dialog();
+    return false;
+  }
+  return save_level_to(document_path_);
+}
+bool Editor::save_level_to(const std::filesystem::path &path) {
   try {
-    const auto target =
-        document_path_.empty() ? std::filesystem::path(path_) : document_path_;
+    if (path.empty())
+      throw std::invalid_argument("Level path cannot be empty");
+    const auto target = std::filesystem::absolute(path).lexically_normal();
     if (target.empty())
       throw std::invalid_argument("Level path cannot be empty");
+    const auto source = pending_tileset_source_.empty() ? tileset_.path()
+                                                        : pending_tileset_source_;
+    const auto reference = ensure_document_asset(
+        source, target, document_.level().tileset_path);
+    if (reference != document_.level().tileset_path) {
+      document_.set_asset_settings(reference, level_tile_width_,
+                                   level_tile_height_, tile_width_,
+                                   tile_height_);
+      std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                    reference.c_str());
+    }
     save(document_.level(), target);
     document_path_ = target;
-    const auto text = target.string();
-    std::snprintf(path_, sizeof(path_), "%s", text.c_str());
+    fit_requested_ = true;
     document_.mark_saved();
     status_ = "Saved";
     return true;
   } catch (const std::exception &e) {
-    status_ = e.what();
+    report_error(e.what());
     return false;
   }
 }
-bool Editor::save_level_as() {
+void Editor::import_tileset(const std::filesystem::path &path) {
   try {
-    const std::filesystem::path target(path_);
-    if (target.empty())
-      throw std::invalid_argument("Level path cannot be empty");
-    save(document_.level(), target);
-    document_path_ = target;
-    document_.mark_saved();
-    status_ = "Saved as " + target.string();
-    return true;
+    const auto extension = path.extension().string();
+    if (extension.size() != 4 || extension[0] != '.' ||
+        std::tolower(static_cast<unsigned char>(extension[1])) != 'p' ||
+        std::tolower(static_cast<unsigned char>(extension[2])) != 'n' ||
+        std::tolower(static_cast<unsigned char>(extension[3])) != 'g')
+      throw std::invalid_argument("Choose a PNG tileset image");
+    const auto source = std::filesystem::absolute(path).lexically_normal();
+    tileset_.load(renderer_, source, tile_width_, tile_height_);
+    auto stem = path_text(source.stem());
+    for (auto &character : stem)
+      if (!std::isalnum(static_cast<unsigned char>(character)) &&
+          character != '-' && character != '_')
+        character = '_';
+    if (stem.empty() || stem == "." || stem == "..")
+      stem = "imported-tileset";
+    const auto reference = "assets/" + stem + ".png";
+    document_.set_asset_settings(reference, level_tile_width_,
+                                 level_tile_height_, tile_width_,
+                                 tile_height_);
+    pending_tileset_source_ = source;
+    std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                  reference.c_str());
+    selected_tile_ = 1;
+    mark_dirty_status();
+    status_ = "Imported tileset; it will be copied beside the level on save";
   } catch (const std::exception &e) {
-    status_ = e.what();
-    return false;
+    report_error(e.what());
   }
 }
 void Editor::request_close() {
-  if (document_.dirty())
+  if (document_.dirty()) {
+    if (!confirm_close_)
+      defer_close_prompt_ = true;
     confirm_close_ = true;
-  else
+  } else {
     close_requested_ = true;
+  }
 }
-void Editor::open_path() {
+void Editor::open_path(const std::filesystem::path &path) {
   try {
     if (stroke_active_) {
       document_.end_stroke();
       stroke_active_ = false;
     }
-    auto loaded = load(path_);
-    std::string asset_warning;
-    std::vector<std::filesystem::path> asset_candidates{
-        std::filesystem::current_path() / loaded.tileset_path};
-    if (const char *executable_base = SDL_GetBasePath();
-        executable_base && *executable_base)
-      asset_candidates.emplace_back(std::filesystem::path(executable_base) /
-                                    loaded.tileset_path);
-    asset_candidates.emplace_back(
-        std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR).parent_path() /
-        loaded.tileset_path);
-    std::exception_ptr asset_error;
-    for (const auto &asset_path : asset_candidates) {
-      try {
-        tileset_.load(renderer_, asset_path, loaded.atlas_tile_width,
-                      loaded.atlas_tile_height);
-        asset_error = nullptr;
-        break;
-      } catch (...) {
-        asset_error = std::current_exception();
-      }
-    }
-    if (asset_error) {
-      try {
-        std::rethrow_exception(asset_error);
-      } catch (const std::exception &error) {
-        asset_warning = std::string("; tileset unavailable: ") + error.what();
-      }
-    } else {
-      std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
-                    loaded.tileset_path.c_str());
-      tile_width_ = loaded.atlas_tile_width;
-      tile_height_ = loaded.atlas_tile_height;
-    }
+    const auto target = std::filesystem::absolute(path).lexically_normal();
+    auto loaded = load(target);
+    const auto asset_path =
+        resolve_asset_path(loaded.tileset_path, target, resource_root_);
+    tileset_.load(renderer_, asset_path, loaded.atlas_tile_width,
+                  loaded.atlas_tile_height);
+    stop_playtest();
+    std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
+                  loaded.tileset_path.c_str());
+    tile_width_ = loaded.atlas_tile_width;
+    tile_height_ = loaded.atlas_tile_height;
     document_ = Document(std::move(loaded));
     document_.mark_saved();
-    document_path_ = path_;
+    document_path_ = target;
+    pending_tileset_source_.clear();
+    show_welcome_ = false;
     genre_ = document_.level().genre == Genre::top_down_rpg ? 0 : 1;
     width_ = document_.level().width;
     height_ = document_.level().height;
     level_tile_width_ = document_.level().tile_width;
     level_tile_height_ = document_.level().tile_height;
     set_active_layer(0);
-    status_ = "Opened level" + asset_warning;
+    fit_requested_ = true;
+    status_ = "Opened " + path_text(target.filename());
   } catch (const std::exception &e) {
-    status_ = e.what();
+    report_error(e.what());
   }
 }
 void Editor::new_level() {
@@ -169,9 +525,9 @@ void Editor::new_level() {
     level.atlas_tile_height = tile_height_;
     level.tileset_path = tileset_path_;
     level.validate();
+    stop_playtest();
     document_ = Document(std::move(level));
     document_path_.clear();
-    std::snprintf(path_, sizeof(path_), "level.json");
     set_active_layer(0);
     status_ = "Created new level";
     selected_entity_id_ = 0;
@@ -180,27 +536,36 @@ void Editor::new_level() {
   }
 }
 void Editor::toolbar() {
+  exit_menu_activated_this_frame_ = false;
   if (ImGui::BeginMainMenuBar()) {
-    if (ImGui::BeginMenu("File")) {
+    const bool file_menu_open = ImGui::BeginMenu("File");
+    if (interaction_test_mode_ && !file_menu_open)
+      record_visual_control("File menu");
+    if (file_menu_open) {
       if (ImGui::MenuItem("New", "Ctrl+N")) {
         if (document_.dirty())
           confirm_new_ = true;
         else
           new_level();
       }
-      if (ImGui::MenuItem("Open...", "Ctrl+O")) {
-        if (document_.dirty())
-          confirm_open_ = true;
-        else
-          open_path();
-      }
-      if (ImGui::MenuItem("Save", "Ctrl+S"))
+      if (ImGui::MenuItem("Welcome"))
+        show_welcome_ = true;
+      if (ImGui::MenuItem("Open...", "Ctrl+O", false, !dialog_pending_))
+        request_open_dialog();
+      if (ImGui::MenuItem("Save", "Ctrl+S", false, !dialog_pending_))
         save_level();
-      if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S"))
-        save_level_as();
+      if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S", false,
+                          !dialog_pending_))
+        request_save_dialog();
+      if (ImGui::MenuItem("Import PNG tileset...", nullptr, false,
+                          !dialog_pending_))
+        request_tileset_dialog();
       ImGui::Separator();
-      if (ImGui::MenuItem("Exit"))
+      if (ImGui::MenuItem("Exit")) {
+        exit_menu_activated_this_frame_ = true;
         request_close();
+      }
+      record_visual_control("Exit menu item");
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
@@ -211,8 +576,8 @@ void Editor::toolbar() {
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
-      if (ImGui::MenuItem("Show grid", nullptr, &grid_visible_)) {
-      }
+      ImGui::MenuItem("Show grid", nullptr, &grid_visible_);
+      ImGui::MenuItem("Playtest collision debug", "F3", &debug_overlay_);
       if (ImGui::MenuItem("Fit level", "F"))
         fit_requested_ = true;
       if (ImGui::MenuItem("Reset zoom", "0")) {
@@ -220,26 +585,39 @@ void Editor::toolbar() {
         pan_x_ = 20;
         pan_y_ = 20;
       }
+      if (ImGui::BeginMenu("UI scale")) {
+        for (const int percent : {100, 125, 150, 200}) {
+          char label[16];
+          std::snprintf(label, sizeof(label), "%d%%", percent);
+          if (ImGui::MenuItem(label, nullptr, ui_scale_percent_ == percent))
+            apply_ui_scale(percent);
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::MenuItem("Reset workspace layout"))
+        reset_layout_requested_ = true;
       ImGui::EndMenu();
     }
     ImGui::EndMainMenuBar();
   }
-  ImGui::SetNextWindowPos(ImVec2(8, 28), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(1264, 52), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Toolbar")) {
     if (playtest_) {
-      ImGui::TextUnformatted("PLAYTEST");
-      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(0.45f, 0.78f, 0.96f, 1), "PLAYTEST");
+      ImGui::SameLine(0, 14);
       if (ImGui::Button(playtest_->paused() ? "Resume" : "Pause"))
         playtest_->set_paused(!playtest_->paused());
+      record_visual_control("Pause/Resume");
       ImGui::SameLine();
       if (ImGui::Button("Reset"))
         playtest_->reset();
+      record_visual_control("Reset");
       ImGui::SameLine();
-      if (ImGui::Button("Stop"))
-        playtest_.reset();
-      ImGui::SameLine();
-      ImGui::Text("%s", genre_name(document_.level().genre).c_str());
+      if (ImGui::Button("Stop")) {
+        stop_playtest();
+      }
+      record_visual_control("Stop");
+      ImGui::SameLine(0, 14);
+      ImGui::Checkbox("Debug overlay", &debug_overlay_);
     } else {
       if (ImGui::Button("Play")) {
         try {
@@ -253,51 +631,67 @@ void Editor::toolbar() {
           }
           playtest_ = std::make_unique<gameplay::Session>(document_.level());
           last_playtest_frame_ = std::chrono::steady_clock::now();
+          focus_canvas_ = true;
         } catch (const std::exception &error) {
           status_ = error.what();
         }
       }
-      ImGui::SameLine();
+      record_visual_control("Play");
+      ImGui::SameLine(0, 10);
+      ImGui::BeginDisabled(!document_.can_undo());
       if (ImGui::Button("Undo"))
         document_.undo();
+      ImGui::EndDisabled();
+      record_visual_control("Undo");
       ImGui::SameLine();
+      ImGui::BeginDisabled(!document_.can_redo());
       if (ImGui::Button("Redo"))
         document_.redo();
+      ImGui::EndDisabled();
+      record_visual_control("Redo");
       ImGui::SameLine();
-      for (auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle, Tool::line,
-                        Tool::fill, Tool::eyedropper, Tool::collision,
-                        Tool::entity}) {
-        if (tool != Tool::pencil)
-          ImGui::SameLine();
-        if (tool_ == tool)
-          ImGui::PushStyleColor(
-              ImGuiCol_Button,
-              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (ImGui::Button(tool_name(tool)))
-          tool_ = tool;
-        if (tool_ == tool)
-          ImGui::PopStyleColor();
+      ImGui::SetNextItemWidth(
+          ui_scale_percent_ >= 200 ? 170.0f
+                                   : (ImGui::GetWindowWidth() < 1100.0f
+                                          ? 118.0f
+                                          : 145.0f));
+      if (ImGui::BeginCombo("##active-tool", tool_name(tool_))) {
+        for (const auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle,
+                                Tool::line, Tool::fill, Tool::eyedropper,
+                                Tool::collision, Tool::entity}) {
+          const bool selected = tool == tool_;
+          if (ImGui::Selectable(tool_name(tool), selected))
+            tool_ = tool;
+          if (selected)
+            ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
       }
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Active editing tool");
+      record_visual_control("Tool selector");
       ImGui::SameLine();
       ImGui::Checkbox("Grid", &grid_visible_);
+      record_visual_control("Grid toggle");
+      ImGui::SameLine();
+      ImGui::Checkbox(ui_scale_percent_ >= 200 ? "Coll." : "Collision",
+                      &collision_visible_);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Collision overlay");
+      record_visual_control("Collision toggle");
       ImGui::SameLine();
       if (ImGui::Button("Fit"))
         fit_requested_ = true;
+      record_visual_control("Fit");
       ImGui::SameLine();
       if (ImGui::Button("100%")) {
         zoom_ = 1;
         pan_x_ = 20;
         pan_y_ = 20;
       }
-      ImGui::SameLine();
-      ImGui::Text("%s%s | %dx%d | %.0f%%",
-                  document_path_.empty()
-                      ? "Untitled"
-                      : document_path_.filename().string().c_str(),
-                  document_.dirty() ? " *" : "", document_.level().width,
-                  document_.level().height, zoom_ * 100.0f);
-      ImGui::SameLine();
-      ImGui::Checkbox("Collision", &collision_visible_);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Reset zoom to 100%%");
+      record_visual_control("Reset zoom");
     }
   }
   ImGui::End();
@@ -308,15 +702,23 @@ void Editor::toolbar() {
   if (ImGui::BeginPopupModal("Discard edits before New?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
+    if (close_new_popup_) {
+      close_new_popup_ = false;
+      ImGui::CloseCurrentPopup();
+    }
     if (ImGui::Button("Save and create")) {
-      if (save_level()) {
+      if (document_path_.empty())
+        request_save_dialog(SaveIntent::create_new);
+      else if (save_level()) {
         new_level();
+        show_welcome_ = false;
         ImGui::CloseCurrentPopup();
       }
     }
     ImGui::SameLine();
     if (ImGui::Button("Discard and create")) {
       new_level();
+      show_welcome_ = false;
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
@@ -331,48 +733,76 @@ void Editor::toolbar() {
   if (ImGui::BeginPopupModal("Discard edits before Open?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
+    if (close_open_popup_) {
+      close_open_popup_ = false;
+      ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("Save and open")) {
+      if (document_path_.empty())
+        request_save_dialog(SaveIntent::open_level);
+      else if (save_level()) {
+        open_path(pending_open_path_);
+        pending_open_path_.clear();
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Discard and open")) {
-      open_path();
+      open_path(pending_open_path_);
+      pending_open_path_.clear();
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel"))
+    if (ImGui::Button("Cancel")) {
+      pending_open_path_.clear();
       ImGui::CloseCurrentPopup();
+    }
     ImGui::EndPopup();
   }
   if (confirm_close_) {
-    ImGui::OpenPopup("Save changes before exit?");
-    confirm_close_ = false;
+    if (defer_close_prompt_) {
+      defer_close_prompt_ = false;
+    } else {
+      ImGui::OpenPopup("Save changes before exit?");
+      confirm_close_ = false;
+    }
   }
   if (ImGui::BeginPopupModal("Save changes before exit?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
     if (ImGui::Button("Save and exit")) {
-      if (save_level()) {
+      if (document_path_.empty())
+        request_save_dialog(SaveIntent::close_application);
+      else if (save_level()) {
         close_requested_ = true;
         confirm_close_ = false;
         ImGui::CloseCurrentPopup();
       }
     }
+    record_visual_control("Save and exit");
     ImGui::SameLine();
     if (ImGui::Button("Discard and exit")) {
       close_requested_ = true;
       confirm_close_ = false;
       ImGui::CloseCurrentPopup();
     }
+    record_visual_control("Discard and exit");
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {
       confirm_close_ = false;
       ImGui::CloseCurrentPopup();
     }
+    record_visual_control("Cancel close");
     ImGui::EndPopup();
   }
 }
 void Editor::layers_panel() {
-  ImGui::SetNextWindowPos(ImVec2(1016, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(256, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Layers");
-  if (ImGui::Button("+ Layer")) {
+  ImGui::TextUnformatted("Layer name");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputText("##new-layer-name", layer_name_, sizeof(layer_name_));
+  record_visual_control("Layer name field");
+  if (ImGui::Button("+ Layer", ImVec2(-1, 0))) {
     try {
       document_.create_layer(layer_name_);
       set_active_layer(static_cast<int>(document_.level().layers.size()) - 1);
@@ -381,8 +811,7 @@ void Editor::layers_panel() {
       status_ = e.what();
     }
   }
-  ImGui::SameLine();
-  ImGui::InputText("##new-layer-name", layer_name_, sizeof(layer_name_));
+  record_visual_control("Add layer");
   for (int i = static_cast<int>(document_.level().layers.size()) - 1; i >= 0;
        --i) {
     const auto &layer = document_.level().layers[static_cast<std::size_t>(i)];
@@ -390,9 +819,9 @@ void Editor::layers_panel() {
     ImGui::PushID(i);
     if (ImGui::Selectable(layer.name.c_str(), active_layer_ == i,
                           ImGuiSelectableFlags_AllowDoubleClick,
-                          ImVec2(112, 0)))
+                          ImVec2(0, 0)))
       set_active_layer(i);
-    ImGui::SameLine();
+    record_visual_control("Layer selector");
     bool visible = layer.visible;
     if (ImGui::Checkbox("V##visible", &visible)) {
       try {
@@ -402,6 +831,7 @@ void Editor::layers_panel() {
         status_ = e.what();
       }
     }
+    record_visual_control("Layer visibility");
     ImGui::SameLine();
     bool locked = layer.locked;
     if (ImGui::Checkbox("L##locked", &locked)) {
@@ -412,22 +842,24 @@ void Editor::layers_panel() {
         status_ = e.what();
       }
     }
+    record_visual_control("Layer lock");
     if (active_layer_ == i) {
-      if (ImGui::SmallButton("Move up") &&
+      if (ImGui::SmallButton("Up") &&
           i + 1 < static_cast<int>(document_.level().layers.size())) {
         document_.move_layer(i, i + 1);
         set_active_layer(i + 1);
         mark_dirty_status();
       }
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Move down") && i > 0) {
+      record_visual_control("Move layer up");
+      if (ImGui::SmallButton("Down") && i > 0) {
         document_.move_layer(i, i - 1);
         set_active_layer(i - 1);
         mark_dirty_status();
       }
-      ImGui::SameLine();
+      record_visual_control("Move layer down");
       if (ImGui::SmallButton("Rename"))
         ImGui::OpenPopup("Rename layer");
+      record_visual_control("Rename layer");
       if (ImGui::BeginPopup("Rename layer")) {
         static char renamed[128];
         if (ImGui::IsWindowAppearing())
@@ -444,7 +876,6 @@ void Editor::layers_panel() {
         }
         ImGui::EndPopup();
       }
-      ImGui::SameLine();
       if (ImGui::SmallButton("Delete")) {
         try {
           document_.delete_layer(i);
@@ -455,6 +886,7 @@ void Editor::layers_panel() {
           status_ = e.what();
         }
       }
+      record_visual_control("Delete layer");
     }
     ImGui::PopID();
   }
@@ -496,12 +928,13 @@ void Editor::sync_entity_fields() {
     entity_message_[0] = '\0';
 }
 void Editor::entity_inspector() {
-  ImGui::SetNextWindowPos(ImVec2(1016, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(256, 320), ImGuiCond_FirstUseEver);
   ImGui::Begin("Entities");
   const char *types =
       "Player spawn\0NPC\0Enemy\0Collectible\0Trigger\0Checkpoint\0Hazard\0";
-  ImGui::Combo("Place type", &entity_type_index_, types);
+  ImGui::TextUnformatted("Place type");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::Combo("##entity-place-type", &entity_type_index_, types);
+  record_visual_control("Entity type selector");
   const auto &entities = document_.level().entities;
   auto found =
       std::find_if(entities.begin(), entities.end(), [&](const auto &entity) {
@@ -517,11 +950,19 @@ void Editor::entity_inspector() {
   ImGui::Text("ID: %llu | %s", static_cast<unsigned long long>(found->id),
               entity_type_name(found->type).c_str());
   ImGui::InputFloat("X", &entity_x_, 0.25f, 1.0f, "%.2f");
+  record_visual_control("Entity X field");
   ImGui::InputFloat("Y", &entity_y_, 0.25f, 1.0f, "%.2f");
-  ImGui::InputText("Name", entity_name_, sizeof(entity_name_));
-  ImGui::InputTextMultiline("Message", entity_message_, sizeof(entity_message_),
-                            ImVec2(0, 70));
-  if (ImGui::Button("Apply properties")) {
+  record_visual_control("Entity Y field");
+  ImGui::TextUnformatted("Entity name");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputText("##entity-name", entity_name_, sizeof(entity_name_));
+  record_visual_control("Entity name field");
+  ImGui::TextUnformatted("Message");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputTextMultiline("##entity-message", entity_message_, sizeof(entity_message_),
+                            ImVec2(0, 70.0f * ui_scale_percent_ / 100.0f));
+  record_visual_control("Entity message field");
+  if (ImGui::Button("Apply properties", ImVec2(-1, 0))) {
     Entity changed = *found;
     changed.x = entity_x_;
     changed.y = entity_y_;
@@ -540,8 +981,8 @@ void Editor::entity_inspector() {
       status_ = e.what();
     }
   }
-  ImGui::SameLine();
-  if (ImGui::Button("Delete entity")) {
+  record_visual_control("Apply entity properties");
+  if (ImGui::Button("Delete entity", ImVec2(-1, 0))) {
     try {
       document_.delete_entity(selected_entity_id_);
       selected_entity_id_ = 0;
@@ -551,18 +992,27 @@ void Editor::entity_inspector() {
       status_ = e.what();
     }
   }
+  record_visual_control("Delete entity");
   ImGui::TextWrapped("Select and drag markers with the Entity tool. Entity "
                      "coordinates use tile units.");
   ImGui::End();
 }
 void Editor::canvas() {
+  const bool request_focus = focus_canvas_;
   if (playtest_) {
-    playtest_canvas();
+    cursor_on_level_ = false;
+    if (request_focus)
+      ImGui::SetNextWindowFocus();
+    focus_canvas_ = false;
+    playtest_canvas(request_focus);
     return;
   }
-  ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
+  if (request_focus)
+    ImGui::SetNextWindowFocus();
+  focus_canvas_ = false;
   ImGui::Begin("Level Canvas");
+  if (request_focus)
+    ImGui::SetKeyboardFocusHere();
   ImVec2 pos = ImGui::GetCursorScreenPos(),
          size = ImGui::GetContentRegionAvail();
   size.x = std::max(size.x, 1.0f);
@@ -571,6 +1021,7 @@ void Editor::canvas() {
                          ImGuiButtonFlags_MouseButtonLeft |
                              ImGuiButtonFlags_MouseButtonRight |
                              ImGuiButtonFlags_MouseButtonMiddle);
+  record_visual_control("Tilemap canvas");
   const bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
   auto &io = ImGui::GetIO();
   auto *draw = ImGui::GetWindowDrawList();
@@ -593,7 +1044,7 @@ void Editor::canvas() {
   }
   if (focused && ImGui::IsKeyPressed(ImGuiKey_S) && io.KeyCtrl) {
     if (io.KeyShift)
-      save_level_as();
+      request_save_dialog();
     else
       save_level();
   }
@@ -603,12 +1054,8 @@ void Editor::canvas() {
     else
       new_level();
   }
-  if (focused && ImGui::IsKeyPressed(ImGuiKey_O) && io.KeyCtrl) {
-    if (document_.dirty())
-      confirm_open_ = true;
-    else
-      open_path();
-  }
+  if (focused && ImGui::IsKeyPressed(ImGuiKey_O) && io.KeyCtrl)
+    request_open_dialog();
   if (focused && ImGui::IsKeyPressed(ImGuiKey_F))
     fit_requested_ = true;
   if (focused && ImGui::IsKeyPressed(ImGuiKey_0)) {
@@ -631,14 +1078,19 @@ void Editor::canvas() {
   float cell_x = document_.level().tile_width * zoom_;
   float cell_y = document_.level().tile_height * zoom_;
   ImVec2 origin(pos.x + pan_x_, pos.y + pan_y_);
+  coordinates::TileGridTransform grid{origin.x, origin.y, cell_x, cell_y};
   auto cursor_cell = [&]() {
-    int x = static_cast<int>(std::floor((io.MousePos.x - origin.x) / cell_x)),
-        y = static_cast<int>(std::floor((io.MousePos.y - origin.y) / cell_y));
+    const auto tile = grid.unproject(io.MousePos.x, io.MousePos.y);
+    int x = static_cast<int>(std::floor(tile.x));
+    int y = static_cast<int>(std::floor(tile.y));
     return std::pair{x, y};
   };
   auto [mx, my] = cursor_cell();
   const bool inside = mx >= 0 && my >= 0 && mx < document_.level().width &&
                       my < document_.level().height;
+  cursor_on_level_ = hovered && inside;
+  cursor_cell_x_ = cursor_on_level_ ? mx : -1;
+  cursor_cell_y_ = cursor_on_level_ ? my : -1;
   if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && inside) {
     if (tool_ == Tool::pencil || tool_ == Tool::eraser) {
       stroke_value_ = tool_ == Tool::eraser ? 0 : selected_tile_;
@@ -658,8 +1110,9 @@ void Editor::canvas() {
     } else if (tool_ == Tool::entity) {
       const auto &entities = document_.level().entities;
       const Entity *found = nullptr;
-      const float world_x = (io.MousePos.x - origin.x) / cell_x;
-      const float world_y = (io.MousePos.y - origin.y) / cell_y;
+      const auto world = grid.unproject(io.MousePos.x, io.MousePos.y);
+      const float world_x = world.x;
+      const float world_y = world.y;
       for (auto it = entities.rbegin(); it != entities.rend(); ++it)
         if (std::abs(it->x - world_x) < 0.5f &&
             std::abs(it->y - world_y) < 0.5f) {
@@ -787,18 +1240,27 @@ void Editor::canvas() {
   draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
                       IM_COL32(25, 28, 34, 255));
   if (fit_requested_) {
-    zoom_ = std::clamp(std::min(size.x / (document_.level().width *
-                                          document_.level().tile_width),
-                                size.y / (document_.level().height *
-                                          document_.level().tile_height)),
-                       0.2f, 6.0f);
+    constexpr float fit_padding = 0.94f;
+    zoom_ = std::clamp(std::min(size.x * fit_padding /
+                                          (document_.level().width *
+                                           document_.level().tile_width),
+                                size.y * fit_padding /
+                                          (document_.level().height *
+                                           document_.level().tile_height)),
+                       0.05f, 6.0f);
     cell_x = document_.level().tile_width * zoom_;
     cell_y = document_.level().tile_height * zoom_;
     pan_x_ = (size.x - document_.level().width * cell_x) * 0.5f;
     pan_y_ = (size.y - document_.level().height * cell_y) * 0.5f;
     origin = ImVec2(pos.x + pan_x_, pos.y + pan_y_);
+    grid = {origin.x, origin.y, cell_x, cell_y};
     fit_requested_ = false;
   }
+  visual_geometry_ = {pos.x, pos.y, size.x, size.y, origin.x, origin.y,
+                      document_.level().width * cell_x,
+                      document_.level().height * cell_y, zoom_,
+                      document_.level().width, document_.level().height,
+                      ui_scale_percent_};
   const int x0 = std::clamp(static_cast<int>(std::floor(-pan_x_ / cell_x)), 0,
                             document_.level().width),
             y0 = std::clamp(static_cast<int>(std::floor(-pan_y_ / cell_y)), 0,
@@ -858,16 +1320,17 @@ void Editor::canvas() {
   draw->PopClipRect();
   ImGui::End();
 }
-void Editor::playtest_canvas() {
-  ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Playtest");
+void Editor::playtest_canvas(bool request_focus) {
+  ImGui::Begin("Level Canvas");
+  if (request_focus)
+    ImGui::SetKeyboardFocusHere();
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   ImVec2 size = ImGui::GetContentRegionAvail();
   size.x = std::max(size.x, 1.0f);
   size.y = std::max(size.y, 1.0f);
   ImGui::InvisibleButton("runtime-canvas", size);
-  const bool focused = ImGui::IsItemFocused();
+  const bool focused = ImGui::IsWindowFocused(
+      ImGuiFocusedFlags_RootAndChildWindows);
   const auto now = std::chrono::steady_clock::now();
   const float elapsed =
       std::chrono::duration<float>(now - last_playtest_frame_).count();
@@ -891,11 +1354,14 @@ void Editor::playtest_canvas() {
   const auto &level = playtest_->visual_level();
   const auto &world = playtest_->world();
   const auto &player = playtest_->player();
+  if (focused && ImGui::IsKeyPressed(ImGuiKey_F3))
+    debug_overlay_ = !debug_overlay_;
   const float cell = std::clamp(std::min(size.x / std::min(level.width, 30),
                                          size.y / std::min(level.height, 20)),
                                 8.0f, 40.0f);
-  const ImVec2 origin(pos.x + size.x * 0.5f - player.x * cell,
-                      pos.y + size.y * 0.5f - player.y * cell);
+  const coordinates::TileCamera camera{
+      pos.x + size.x * 0.5f - player.x * cell,
+      pos.y + size.y * 0.5f - player.y * cell, cell};
   auto *draw = ImGui::GetWindowDrawList();
   draw->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), true);
   draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
@@ -909,33 +1375,89 @@ void Editor::playtest_canvas() {
             layer.tiles[static_cast<std::size_t>(y * level.width + x)];
         if (tile == 0)
           continue;
-        const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
-        const ImVec2 b(a.x + cell, a.y + cell);
-        draw_tile(draw, tileset_, tile, a, b);
+        const auto a = camera.project(static_cast<float>(x),
+                                      static_cast<float>(y));
+        const auto b = camera.project(static_cast<float>(x + 1),
+                                      static_cast<float>(y + 1));
+        draw_tile(draw, tileset_, tile, ImVec2(a.x, a.y), ImVec2(b.x, b.y));
+      }
+  }
+  if (debug_overlay_) {
+    for (int y = 0; y < world.height; ++y)
+      for (int x = 0; x < world.width; ++x) {
+        if (!world.solid(x, y))
+          continue;
+        const auto a = camera.project(static_cast<float>(x),
+                                      static_cast<float>(y));
+        const auto b = camera.project(static_cast<float>(x + 1),
+                                      static_cast<float>(y + 1));
+        draw->AddRect(ImVec2(a.x, a.y), ImVec2(b.x, b.y),
+                      IM_COL32(255, 96, 72, 210), 0, 0, 1.5f);
       }
   }
   for (const auto &entity : world.entities) {
     if (entity.type == EntityType::player_spawn ||
+        entity.type == EntityType::enemy ||
         entity.type == EntityType::collectible ||
         entity.type == EntityType::npc || entity.type == EntityType::hazard ||
         entity.type == EntityType::checkpoint ||
         entity.type == EntityType::trigger) {
-      const ImVec2 center(origin.x + entity.x * cell,
-                          origin.y + entity.y * cell);
-      const ImU32 color =
-          entity.type == EntityType::npc           ? IM_COL32(80, 170, 255, 255)
-          : entity.type == EntityType::collectible ? IM_COL32(255, 215, 80, 255)
-          : entity.type == EntityType::hazard      ? IM_COL32(255, 75, 65, 255)
-                                              : IM_COL32(190, 125, 240, 255);
-      draw->AddCircleFilled(center, std::max(5.0f, cell * 0.22f), color);
+      const auto projected = camera.project(entity.x, entity.y);
+      draw_runtime_entity(draw, entity.type, ImVec2(projected.x, projected.y),
+                          cell);
     }
   }
-  const ImVec2 player_center(origin.x + player.x * cell,
-                             origin.y + player.y * cell);
-  draw->AddRectFilled(
-      ImVec2(player_center.x - cell * 0.28f, player_center.y - cell * 0.36f),
-      ImVec2(player_center.x + cell * 0.28f, player_center.y + cell * 0.36f),
-      IM_COL32(80, 235, 145, 255), 3.0f);
+  const auto player_bounds = gameplay::bounds(player);
+  const auto player_rect = camera.project(
+      player_bounds.left, player_bounds.top, player_bounds.right,
+      player_bounds.bottom);
+  const double animation_rate = player.moving ? 8.0 : 2.0;
+  const int animation_frame =
+      static_cast<int>(ImGui::GetTime() * animation_rate) & 1;
+  const bool jumping = level.genre == Genre::platformer && !player.grounded &&
+                       player.velocity_y < 0.0f;
+  const bool falling = level.genre == Genre::platformer && !player.grounded &&
+                       player.velocity_y >= 0.0f;
+  draw_runtime_player(draw, ImVec2(player_rect.left, player_rect.top),
+                      ImVec2(player_rect.right, player_rect.bottom),
+                      player.facing_x, player.facing_y, player.moving, jumping,
+                      falling, animation_frame);
+  if (debug_overlay_) {
+    draw->AddRect(ImVec2(player_rect.left, player_rect.top),
+                  ImVec2(player_rect.right, player_rect.bottom),
+                  IM_COL32(255, 255, 255, 255), 0, 0, 2.0f);
+    char details[512];
+    const char *mode = level.genre == Genre::platformer ? "platformer"
+                                                        : "top_down_rpg";
+    char support_text[64], contact_text[64];
+    if (player.support_tile_x >= 0)
+      std::snprintf(support_text, sizeof(support_text), "tile (%d, %d)",
+                    player.support_tile_x, player.support_tile_y);
+    else
+      std::snprintf(support_text, sizeof(support_text), "none");
+    if (player.contact_tile_x >= 0)
+      std::snprintf(contact_text, sizeof(contact_text), "tile (%d, %d)",
+                    player.contact_tile_x, player.contact_tile_y);
+    else
+      std::snprintf(contact_text, sizeof(contact_text), "none");
+    std::snprintf(details, sizeof(details),
+                  "Mode: %s\nPosition: %.3f, %.3f\nVelocity: %.3f, %.3f\n"
+                  "Grounded: %s\nSupport: %s\nContact: %s\n"
+                  "Normals: (%d, %d)\nCamera origin: %.1f, %.1f\n"
+                  "Scale: %.1f px/tile",
+                  mode, player.x, player.y, player.velocity_x,
+                  player.velocity_y, player.grounded ? "yes" : "no",
+                  support_text, contact_text, player.contact_normal_x,
+                  player.contact_normal_y, camera.origin_x, camera.origin_y,
+                  camera.pixels_per_tile);
+    const ImVec2 text_size = ImGui::CalcTextSize(details);
+    const ImVec2 box(pos.x + 8, pos.y + 54);
+    draw->AddRectFilled(box, ImVec2(box.x + text_size.x + 18,
+                                    box.y + text_size.y + 14),
+                        IM_COL32(10, 14, 18, 220), 4.0f);
+    draw->AddText(ImVec2(box.x + 9, box.y + 7), IM_COL32(220, 240, 255, 255),
+                  details);
+  }
   draw->AddText(ImVec2(pos.x + 10, pos.y + 10), IM_COL32_WHITE,
                 playtest_->paused()
                     ? "Paused"
@@ -943,81 +1465,178 @@ void Editor::playtest_canvas() {
   if (!playtest_->message().empty())
     draw->AddText(ImVec2(pos.x + 10, pos.y + 32), IM_COL32(255, 230, 125, 255),
                   playtest_->message().c_str());
+  if (level.genre == Genre::top_down_rpg && !debug_overlay_) {
+    const Entity *nearby_npc = nullptr;
+    float nearest_squared = 0.85f * 0.85f;
+    for (const auto &entity : world.entities) {
+      if (entity.type != EntityType::npc)
+        continue;
+      const float dx = player.x - entity.x;
+      const float dy = player.y - entity.y;
+      const float distance_squared = dx * dx + dy * dy;
+      if (distance_squared <= nearest_squared) {
+        nearest_squared = distance_squared;
+        nearby_npc = &entity;
+      }
+    }
+    if (nearby_npc) {
+      std::string prompt = "Press E to talk";
+      const auto name = nearby_npc->properties.find("name");
+      if (name != nearby_npc->properties.end() && name->second.is_string())
+        prompt += " to " + name->second.get<std::string>();
+      draw->AddText(ImVec2(pos.x + 10, pos.y + 54),
+                    IM_COL32(173, 222, 245, 255), prompt.c_str());
+    }
+  }
   draw->PopClipRect();
   ImGui::End();
 }
 void Editor::draw() {
-  ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+  visual_controls_.clear();
+  poll_dialog_result();
+  const ImGuiID dockspace_id =
+      ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+  set_default_layout(dockspace_id, reset_layout_requested_);
   toolbar();
-  if (playtest_) {
-    canvas();
-    return;
+  if (show_welcome_) {
+    const float ui_scale = static_cast<float>(ui_scale_percent_) / 100.0f;
+    const ImVec2 work_size = ImGui::GetMainViewport()->WorkSize;
+    const float welcome_width = std::min(560.0f * ui_scale,
+                                        std::max(320.0f, work_size.x - 24.0f));
+    const float welcome_height = std::min(400.0f * ui_scale,
+                                         std::max(280.0f, work_size.y - 24.0f));
+    ImGui::SetNextWindowSize(ImVec2(welcome_width, welcome_height),
+                             ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Welcome to PixelForge", &show_welcome_)) {
+      const float panel_width = ImGui::GetContentRegionAvail().x;
+      const float button_width = std::min(245.0f * ui_scale, panel_width);
+      const bool side_by_side = panel_width >= button_width * 2.0f + 48.0f;
+      ImGui::TextWrapped("Build and playtest top-down RPGs and platformers in one workspace.");
+      ImGui::Spacing();
+      if (ImGui::Button("New RPG level", ImVec2(button_width, 42.0f * ui_scale))) {
+        genre_ = 0;
+        if (document_.dirty())
+          confirm_new_ = true;
+        else {
+          new_level();
+          show_welcome_ = false;
+        }
+      }
+      record_visual_control("New RPG level");
+      if (side_by_side)
+        ImGui::SameLine();
+      if (ImGui::Button("New platformer level", ImVec2(button_width, 42.0f * ui_scale))) {
+        genre_ = 1;
+        if (document_.dirty())
+          confirm_new_ = true;
+        else {
+          new_level();
+          show_welcome_ = false;
+        }
+      }
+      record_visual_control("New platformer level");
+      if (ImGui::Button("Open an existing level...", ImVec2(button_width, 38.0f * ui_scale)))
+        request_open_dialog();
+      record_visual_control("Open level");
+      ImGui::Separator();
+      ImGui::TextUnformatted("Try a demo");
+      ImGui::TextWrapped("RPG: Talk with Mira and find the Moon crystal. Platformer: cross the spike gap, touch the checkpoint, and reach Finish.");
+      if (ImGui::Button("RPG village", ImVec2(button_width, 42.0f * ui_scale))) {
+        pending_open_path_ = resource_root_ / "examples/rpg.json";
+        if (document_.dirty())
+          confirm_open_ = true;
+        else
+          open_path(pending_open_path_);
+      }
+      record_visual_control("RPG demo");
+      if (side_by_side)
+        ImGui::SameLine();
+      if (ImGui::Button("Platformer challenge", ImVec2(button_width, 42.0f * ui_scale))) {
+        pending_open_path_ = resource_root_ / "examples/platformer.json";
+        if (document_.dirty())
+          confirm_open_ = true;
+        else
+          open_path(pending_open_path_);
+      }
+      record_visual_control("Platformer demo");
+      ImGui::Spacing();
+      ImGui::TextWrapped("Edit with the mouse, then press Play. In playtest use WASD or arrows, Space to jump, and E to interact. Save from File → Save As.");
+      if (ImGui::Button("Continue to editor"))
+        show_welcome_ = false;
+      record_visual_control("Continue to editor");
+    }
+    ImGui::End();
   }
-  ImGui::SetNextWindowPos(ImVec2(8, 88), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(262, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Tileset Palette");
-  ImGui::Combo("New genre", &genre_, "Top-down RPG\0Platformer\0");
-  ImGui::InputInt("New width", &width_);
-  ImGui::InputInt("New height", &height_);
-  ImGui::InputInt("Cell width", &level_tile_width_);
-  ImGui::InputInt("Cell height", &level_tile_height_);
-  if (ImGui::Button("New level")) {
+  auto palette_input = [this](const char *label, int *value) {
+    ImGui::TextUnformatted(label);
+    ImGui::PushID(label);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputInt("##value", value);
+    record_visual_control(label);
+    ImGui::PopID();
+  };
+  ImGui::TextUnformatted("New genre");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::Combo("##new-genre", &genre_, "Top-down RPG\0Platformer\0");
+  record_visual_control("New genre");
+  palette_input("New width", &width_);
+  palette_input("New height", &height_);
+  palette_input("Cell width", &level_tile_width_);
+  palette_input("Cell height", &level_tile_height_);
+  if (ImGui::Button("New level", ImVec2(-1, 0))) {
     if (document_.dirty())
       confirm_new_ = true;
     else
       new_level();
   }
-  ImGui::InputText("Level JSON", path_, sizeof(path_));
-  ImGui::SameLine();
-  if (ImGui::Button("Open")) {
-    if (document_.dirty())
-      confirm_open_ = true;
-    else
-      open_path();
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Save"))
-    save_level();
-  ImGui::SameLine();
-  if (ImGui::Button("Save As"))
-    save_level_as();
+  record_visual_control("New level");
   ImGui::Separator();
-  ImGui::InputText("PNG path", tileset_path_, sizeof(tileset_path_));
-  ImGui::InputInt("Tile width", &tile_width_);
-  ImGui::InputInt("Tile height", &tile_height_);
-  if (ImGui::Button("Load PNG")) {
+  palette_input("Tile width", &tile_width_);
+  palette_input("Tile height", &tile_height_);
+  if (ImGui::Button("Import PNG...", ImVec2(-1, 0)))
+    request_tileset_dialog();
+  record_visual_control("Import tileset");
+  ImGui::TextWrapped("Atlas: %s", tileset_path_);
+  if (ImGui::Button("Apply tileset", ImVec2(-1, 0))) {
     try {
       Level settings = document_.level();
-      settings.tileset_path = tileset_path_;
       settings.tile_width = level_tile_width_;
       settings.tile_height = level_tile_height_;
       settings.atlas_tile_width = tile_width_;
       settings.atlas_tile_height = tile_height_;
       settings.validate();
-      tileset_.load(renderer_, tileset_path_, tile_width_, tile_height_);
+      tileset_.load(renderer_, tileset_.path(), tile_width_, tile_height_);
       document_.set_asset_settings(tileset_path_, level_tile_width_,
                                    level_tile_height_, tile_width_,
                                    tile_height_);
       selected_tile_ = 1;
       status_ = "Loaded PNG tileset";
     } catch (const std::exception &e) {
-      status_ = e.what();
+      report_error(e.what());
     }
   }
+  record_visual_control("Apply tileset settings");
   ImGui::Text("%s", tileset_.loaded() ? "PNG atlas ready" : "No atlas loaded");
   if (tileset_.loaded()) {
     const int count = std::min(tileset_.tile_count(), 255);
-    const int per_row = std::max(
-        1, static_cast<int>((ImGui::GetContentRegionAvail().x) / 42.0f));
+    const float tile_button_size = 38.0f * ui_scale_percent_ / 100.0f;
+    const float tile_step = tile_button_size + ImGui::GetStyle().ItemSpacing.x;
     ImGui::BeginChild("atlas tiles", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    const int per_row = std::max(
+        1, static_cast<int>(ImGui::GetContentRegionAvail().x / tile_step));
     auto *list = ImGui::GetWindowDrawList();
     for (int i = 1; i <= count; ++i) {
       ImGui::PushID(i);
       ImVec2 at = ImGui::GetCursorScreenPos();
-      ImGui::InvisibleButton("tile", ImVec2(38, 38));
+      ImGui::InvisibleButton("tile", ImVec2(tile_button_size, tile_button_size));
       if (ImGui::IsItemClicked())
         selected_tile_ = i;
-      ImVec2 a(at.x + 3, at.y + 3), b(at.x + 35, at.y + 35);
+      if (i <= per_row)
+        record_visual_control("Tile palette item");
+      const float inset = 3.0f * ui_scale_percent_ / 100.0f;
+      ImVec2 a(at.x + inset, at.y + inset),
+          b(at.x + tile_button_size - inset, at.y + tile_button_size - inset);
       if (i == selected_tile_)
         list->AddRect(a, b, IM_COL32(255, 220, 96, 255), 0, 0, 2);
       draw_tile(list, tileset_, i, a, b);
@@ -1032,19 +1651,58 @@ void Editor::draw() {
   if (tileset_.loaded())
     ImGui::SliderInt("Tile ID", &selected_tile_, 0,
                      std::min(tileset_.tile_count(), 255));
+  if (tileset_.loaded())
+    record_visual_control("Tile ID");
   ImGui::End();
   layers_panel();
   entity_inspector();
   canvas();
-  const ImVec2 vp = ImGui::GetMainViewport()->Pos,
-               vsz = ImGui::GetMainViewport()->Size;
-  ImGui::SetNextWindowPos(ImVec2(vp.x, vp.y + vsz.y - 26), ImGuiCond_Always);
-  ImGui::SetNextWindowSize(ImVec2(vsz.x, 26), ImGuiCond_Always);
+  const bool compact_status = ui_scale_percent_ >= 150;
+  if (compact_status)
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                        ImVec2(ImGui::GetStyle().WindowPadding.x, 8.0f));
   ImGui::Begin("Status", nullptr,
                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
-  ImGui::TextWrapped("%s | %s", document_.dirty() ? "Modified" : "Saved",
-                     status_.c_str());
+  if (ui_scale_percent_ >= 150 && status_font_)
+    ImGui::PushFont(status_font_);
+  char cursor[48];
+  if (cursor_on_level_)
+    std::snprintf(cursor, sizeof(cursor), "Cursor: %d, %d", cursor_cell_x_,
+                  cursor_cell_y_);
+  else
+    std::snprintf(cursor, sizeof(cursor), "Cursor: —");
+  ImGui::TextColored(document_.dirty() ? ImVec4(1.0f, 0.77f, 0.40f, 1.0f)
+                                      : ImVec4(0.82f, 0.88f, 0.94f, 1.0f),
+                     "%s%s  |  %s  |  %dx%d",
+                     document_path_.empty()
+                         ? "Untitled"
+                         : path_text(document_path_.filename()).c_str(),
+                     document_.dirty() ? " *" : "",
+                     genre_name(document_.level().genre).c_str(),
+                     document_.level().width, document_.level().height);
+  ImGui::TextWrapped("%s  |  %s  |  %s  |  %.0f%%  |  %s",
+              document_.level().layers[static_cast<std::size_t>(active_layer_)]
+                  .name.c_str(),
+              cursor, tool_name(tool_), zoom_ * 100.0f, status_.c_str());
+  record_visual_control("Status details");
+  if (ui_scale_percent_ >= 150 && status_font_)
+    ImGui::PopFont();
   ImGui::End();
+  if (compact_status)
+    ImGui::PopStyleVar();
+  if (error_popup_pending_) {
+    ImGui::OpenPopup("File operation failed");
+    error_popup_pending_ = false;
+  }
+  if (ImGui::BeginPopupModal("File operation failed", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("%s", error_message_.c_str());
+    if (ImGui::Button("OK")) {
+      error_message_.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
 }
 } // namespace pf
