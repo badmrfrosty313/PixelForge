@@ -65,6 +65,14 @@ if(PIXELFORGE_EDITOR)
  target_link_libraries(PixelForge PRIVATE level gameplay editor_imgui)
  add_test(NAME editor_smoke COMMAND PixelForge --smoke)
  set_tests_properties(editor_smoke PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy" TIMEOUT 20)
+ find_package(Python3 COMPONENTS Interpreter REQUIRED)
+ add_custom_target(visual_qa
+   COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_visual_qa.py"
+           --binary "$<TARGET_FILE:PixelForge>" --output-dir "${CMAKE_BINARY_DIR}/visual-qa"
+   COMMAND $<TARGET_FILE:gameplay_tests> "${CMAKE_CURRENT_SOURCE_DIR}/examples" "${CMAKE_BINARY_DIR}/visual-qa/gameplay-unit-report.json"
+   DEPENDS PixelForge gameplay_tests
+   USES_TERMINAL
+   COMMENT "Capturing SDL/ImGui visual QA and deterministic demo gameplay reports")
  install(TARGETS PixelForge RUNTIME DESTINATION .)
  install(DIRECTORY assets/ DESTINATION assets)
  install(DIRECTORY examples/ DESTINATION examples)

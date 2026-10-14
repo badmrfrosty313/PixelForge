@@ -3,14 +3,18 @@
 #include "serialization.hpp"
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 using namespace pf;
 using namespace pf::gameplay;
 namespace {
 int checks = 0;
+nlohmann::json check_report = nlohmann::json::array();
 void check(bool condition, const char *message) {
   ++checks;
+  check_report.push_back({{"assertion", message}, {"passed", condition}});
   if (!condition)
     throw std::runtime_error(message);
 }
@@ -341,7 +345,7 @@ int main(int argc, char **argv) {
             "repeated session reset restores a valid grounded spawn");
     }
 
-    if (argc != 2)
+    if (argc < 2 || argc > 3)
       throw std::runtime_error("Example directory required");
     const std::filesystem::path examples = argv[1];
     Session rpg_demo(load(examples / "rpg.json"));
@@ -386,6 +390,11 @@ int main(int argc, char **argv) {
     repeat(platform_demo, Input{}, 50);
     check(platform_demo.message().find("Reached Finish") != std::string::npos,
           "platformer sample finish trigger is reachable");
+    if (argc >= 3) {
+      std::ofstream report(argv[2]);
+      report << nlohmann::json{{"schema_version", 1}, {"suite", "deterministic-demo-gameplay"}, {"checks", check_report}, {"passed", true}}.dump(2) << '\n';
+      if (!report) throw std::runtime_error("Could not write gameplay report");
+    }
     std::cout << checks << " gameplay checks passed\n";
   } catch (const std::exception &error) {
     std::cerr << "Gameplay test failure after " << checks

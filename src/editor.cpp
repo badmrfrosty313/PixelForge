@@ -28,6 +28,10 @@ struct DialogMailbox {
   std::optional<Result> result;
 };
 namespace {
+bool horizontally_clipped(float min_x, float max_x, float clip_min_x,
+                          float clip_max_x) {
+  return min_x < clip_min_x - 1.0f || max_x > clip_max_x + 1.0f;
+}
 std::string path_text(const std::filesystem::path &path) {
   const auto encoded = path.u8string();
   return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
@@ -150,6 +154,60 @@ void Editor::stop_playtest() {
   playtest_.reset();
   focus_editor_canvas_ = true;
 }
+void Editor::visual_load_demo(Genre genre, bool playtest) {
+  show_welcome_ = false;
+  if (playtest) {
+    start_smoke_playtest(genre);
+    return;
+  }
+  stop_playtest();
+  const auto filename = genre == Genre::top_down_rpg ? "rpg.json"
+                                                       : "platformer.json";
+  open_path(resource_root_ / "examples" / filename);
+  if (document_path_.filename() != filename)
+    throw std::runtime_error("Visual QA could not load bundled demo");
+  zoom_ = 1.0f;
+  pan_x_ = pan_y_ = 20.0f;
+}
+void Editor::visual_create_large_map() {
+  stop_playtest();
+  show_welcome_ = false;
+  Level level(Genre::top_down_rpg, 128, 96);
+  for (int y = 0; y < level.height; ++y)
+    for (int x = 0; x < level.width; ++x)
+      if (x == 0 || y == 0 || x == level.width - 1 || y == level.height - 1)
+        level.paint(0, x, y, 1);
+  document_ = Document(std::move(level));
+  document_path_.clear();
+  active_layer_ = 0;
+  fit_requested_ = true;
+  status_ = "Large map fit to canvas";
+}
+void Editor::visual_select_entity(std::uint64_t id) {
+  const auto &entities = document_.level().entities;
+  const auto it = std::find_if(entities.begin(), entities.end(),
+                               [id](const Entity &entity) { return entity.id == id; });
+  if (it == entities.end())
+    throw std::runtime_error("Visual QA entity selection was not found");
+  selected_entity_id_ = id;
+  sync_entity_fields();
+}
+void Editor::visual_step_gameplay(const gameplay::Input &input, int steps) {
+  if (!playtest_)
+    throw std::runtime_error("Visual gameplay scenario needs an active playtest");
+  for (int i = 0; i < steps; ++i)
+    playtest_->step(input);
+}
+const gameplay::Player &Editor::visual_player() const {
+  if (!playtest_)
+    throw std::runtime_error("Visual gameplay scenario has no player");
+  return playtest_->player();
+}
+const std::string &Editor::visual_gameplay_message() const {
+  if (!playtest_)
+    throw std::runtime_error("Visual gameplay scenario has no session");
+  return playtest_->message();
+}
 void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
   const ImGuiDockNode *existing = ImGui::DockBuilderGetNode(dockspace_id);
   if (!force && existing &&
@@ -220,6 +278,22 @@ void Editor::report_error(const std::string &message) {
   status_ = message;
   error_message_ = message;
   error_popup_pending_ = true;
+}
+void Editor::record_visual_control(const char *label) {
+  ImGuiWindow *window = ImGui::GetCurrentWindow();
+  if (!window || !ImGui::GetCurrentContext()->WithinFrameScope)
+    return;
+  const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+  const ImRect clip = window->InnerClipRect;
+  visual_controls_.push_back({window->Name, label,
+                              {min.x, min.y, max.x, max.y},
+                              {clip.Min.x, clip.Min.y, clip.Max.x, clip.Max.y},
+                              ImGui::IsItemVisible(),
+                              horizontally_clipped(min.x, max.x, clip.Min.x,
+                                                   clip.Max.x)});
+}
+bool Editor::visual_overflow_probe() noexcept {
+  return horizontally_clipped(95.0f, 110.0f, 0.0f, 100.0f);
 }
 void Editor::poll_dialog_result() {
   std::optional<DialogMailbox::Result> result;
@@ -485,13 +559,16 @@ void Editor::toolbar() {
       ImGui::SameLine(0, 14);
       if (ImGui::Button(playtest_->paused() ? "Resume" : "Pause"))
         playtest_->set_paused(!playtest_->paused());
+      record_visual_control("Pause/Resume");
       ImGui::SameLine();
       if (ImGui::Button("Reset"))
         playtest_->reset();
+      record_visual_control("Reset");
       ImGui::SameLine();
       if (ImGui::Button("Stop")) {
         stop_playtest();
       }
+      record_visual_control("Stop");
       ImGui::SameLine(0, 14);
       ImGui::Checkbox("Debug overlay", &debug_overlay_);
     } else {
@@ -511,16 +588,19 @@ void Editor::toolbar() {
           status_ = error.what();
         }
       }
+      record_visual_control("Play");
       ImGui::SameLine(0, 10);
       ImGui::BeginDisabled(!document_.can_undo());
       if (ImGui::Button("Undo"))
         document_.undo();
       ImGui::EndDisabled();
+      record_visual_control("Undo");
       ImGui::SameLine();
       ImGui::BeginDisabled(!document_.can_redo());
       if (ImGui::Button("Redo"))
         document_.redo();
       ImGui::EndDisabled();
+      record_visual_control("Redo");
       ImGui::SameLine();
       ImGui::TextUnformatted("Tool");
       ImGui::SameLine();
@@ -538,19 +618,24 @@ void Editor::toolbar() {
         }
         ImGui::EndCombo();
       }
+      record_visual_control("Tool selector");
       ImGui::SameLine();
       ImGui::Checkbox("Grid", &grid_visible_);
+      record_visual_control("Grid toggle");
       ImGui::SameLine();
       ImGui::Checkbox("Collision", &collision_visible_);
+      record_visual_control("Collision toggle");
       ImGui::SameLine();
       if (ImGui::Button("Fit"))
         fit_requested_ = true;
+      record_visual_control("Fit");
       ImGui::SameLine();
       if (ImGui::Button("Reset zoom")) {
         zoom_ = 1;
         pan_x_ = 20;
         pan_y_ = 20;
       }
+      record_visual_control("Reset zoom");
     }
   }
   ImGui::End();
@@ -659,8 +744,10 @@ void Editor::layers_panel() {
       status_ = e.what();
     }
   }
+  record_visual_control("Add layer");
   ImGui::SameLine();
   ImGui::InputText("##new-layer-name", layer_name_, sizeof(layer_name_));
+  record_visual_control("Layer name field");
   for (int i = static_cast<int>(document_.level().layers.size()) - 1; i >= 0;
        --i) {
     const auto &layer = document_.level().layers[static_cast<std::size_t>(i)];
@@ -670,6 +757,7 @@ void Editor::layers_panel() {
                           ImGuiSelectableFlags_AllowDoubleClick,
                           ImVec2(112, 0)))
       set_active_layer(i);
+    record_visual_control("Layer selector");
     ImGui::SameLine();
     bool visible = layer.visible;
     if (ImGui::Checkbox("V##visible", &visible)) {
@@ -680,6 +768,7 @@ void Editor::layers_panel() {
         status_ = e.what();
       }
     }
+    record_visual_control("Layer visibility");
     ImGui::SameLine();
     bool locked = layer.locked;
     if (ImGui::Checkbox("L##locked", &locked)) {
@@ -690,6 +779,7 @@ void Editor::layers_panel() {
         status_ = e.what();
       }
     }
+    record_visual_control("Layer lock");
     if (active_layer_ == i) {
       if (ImGui::SmallButton("Move up") &&
           i + 1 < static_cast<int>(document_.level().layers.size())) {
@@ -697,15 +787,18 @@ void Editor::layers_panel() {
         set_active_layer(i + 1);
         mark_dirty_status();
       }
+      record_visual_control("Move layer up");
       ImGui::SameLine();
       if (ImGui::SmallButton("Move down") && i > 0) {
         document_.move_layer(i, i - 1);
         set_active_layer(i - 1);
         mark_dirty_status();
       }
+      record_visual_control("Move layer down");
       ImGui::SameLine();
       if (ImGui::SmallButton("Rename"))
         ImGui::OpenPopup("Rename layer");
+      record_visual_control("Rename layer");
       if (ImGui::BeginPopup("Rename layer")) {
         static char renamed[128];
         if (ImGui::IsWindowAppearing())
@@ -733,6 +826,7 @@ void Editor::layers_panel() {
           status_ = e.what();
         }
       }
+      record_visual_control("Delete layer");
     }
     ImGui::PopID();
   }
@@ -778,6 +872,7 @@ void Editor::entity_inspector() {
   const char *types =
       "Player spawn\0NPC\0Enemy\0Collectible\0Trigger\0Checkpoint\0Hazard\0";
   ImGui::Combo("Place type", &entity_type_index_, types);
+  record_visual_control("Entity type selector");
   const auto &entities = document_.level().entities;
   auto found =
       std::find_if(entities.begin(), entities.end(), [&](const auto &entity) {
@@ -793,10 +888,14 @@ void Editor::entity_inspector() {
   ImGui::Text("ID: %llu | %s", static_cast<unsigned long long>(found->id),
               entity_type_name(found->type).c_str());
   ImGui::InputFloat("X", &entity_x_, 0.25f, 1.0f, "%.2f");
+  record_visual_control("Entity X field");
   ImGui::InputFloat("Y", &entity_y_, 0.25f, 1.0f, "%.2f");
+  record_visual_control("Entity Y field");
   ImGui::InputText("Name", entity_name_, sizeof(entity_name_));
+  record_visual_control("Entity name field");
   ImGui::InputTextMultiline("Message", entity_message_, sizeof(entity_message_),
                             ImVec2(0, 70));
+  record_visual_control("Entity message field");
   if (ImGui::Button("Apply properties")) {
     Entity changed = *found;
     changed.x = entity_x_;
@@ -816,6 +915,7 @@ void Editor::entity_inspector() {
       status_ = e.what();
     }
   }
+  record_visual_control("Apply entity properties");
   ImGui::SameLine();
   if (ImGui::Button("Delete entity")) {
     try {
@@ -827,6 +927,7 @@ void Editor::entity_inspector() {
       status_ = e.what();
     }
   }
+  record_visual_control("Delete entity");
   ImGui::TextWrapped("Select and drag markers with the Entity tool. Entity "
                      "coordinates use tile units.");
   ImGui::End();
@@ -851,6 +952,7 @@ void Editor::canvas() {
                          ImGuiButtonFlags_MouseButtonLeft |
                              ImGuiButtonFlags_MouseButtonRight |
                              ImGuiButtonFlags_MouseButtonMiddle);
+  record_visual_control("Tilemap canvas");
   const bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
   auto &io = ImGui::GetIO();
   auto *draw = ImGui::GetWindowDrawList();
@@ -1078,6 +1180,11 @@ void Editor::canvas() {
     origin = ImVec2(pos.x + pan_x_, pos.y + pan_y_);
     fit_requested_ = false;
   }
+  visual_geometry_ = {pos.x, pos.y, size.x, size.y, origin.x, origin.y,
+                      document_.level().width * cell_x,
+                      document_.level().height * cell_y, zoom_,
+                      document_.level().width, document_.level().height,
+                      ui_scale_percent_};
   const int x0 = std::clamp(static_cast<int>(std::floor(-pan_x_ / cell_x)), 0,
                             document_.level().width),
             y0 = std::clamp(static_cast<int>(std::floor(-pan_y_ / cell_y)), 0,
@@ -1306,6 +1413,7 @@ void Editor::playtest_canvas() {
   ImGui::End();
 }
 void Editor::draw() {
+  visual_controls_.clear();
   poll_dialog_result();
   const ImGuiID dockspace_id =
       ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
@@ -1324,7 +1432,7 @@ void Editor::draw() {
     ImGui::SetNextWindowSize(ImVec2(welcome_width, welcome_height),
                              ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Welcome to PixelForge", &show_welcome_)) {
-      ImGui::TextWrapped("Build and playtest top-down RPGs and platformers in one workspace.");
+        ImGui::TextWrapped("Build and playtest top-down RPGs and platformers in one workspace.");
       ImGui::Spacing();
       if (ImGui::Button("New RPG level", ImVec2(button_width, 42.0f * ui_scale))) {
         genre_ = 0;
@@ -1335,6 +1443,7 @@ void Editor::draw() {
           show_welcome_ = false;
         }
       }
+      record_visual_control("New RPG level");
       if (side_by_side)
         ImGui::SameLine();
       if (ImGui::Button("New platformer level", ImVec2(button_width, 42.0f * ui_scale))) {
@@ -1346,8 +1455,10 @@ void Editor::draw() {
           show_welcome_ = false;
         }
       }
+      record_visual_control("New platformer level");
       if (ImGui::Button("Open an existing level...", ImVec2(button_width, 38.0f * ui_scale)))
         request_open_dialog();
+      record_visual_control("Open level");
       ImGui::Separator();
       ImGui::TextUnformatted("Try a demo");
       ImGui::TextWrapped("RPG: Talk with Mira and find the Moon crystal. Platformer: cross the spike gap, touch the checkpoint, and reach Finish.");
@@ -1358,6 +1469,7 @@ void Editor::draw() {
         else
           open_path(pending_open_path_);
       }
+      record_visual_control("RPG demo");
       if (side_by_side)
         ImGui::SameLine();
       if (ImGui::Button("Platformer challenge", ImVec2(button_width, 42.0f * ui_scale))) {
@@ -1367,30 +1479,41 @@ void Editor::draw() {
         else
           open_path(pending_open_path_);
       }
+      record_visual_control("Platformer demo");
       ImGui::Spacing();
       ImGui::TextWrapped("Edit with the mouse, then press Play. In playtest use WASD or arrows, Space to jump, and E to interact. Save from File → Save As.");
       if (ImGui::Button("Continue to editor"))
         show_welcome_ = false;
+      record_visual_control("Continue to editor");
     }
     ImGui::End();
   }
   ImGui::Begin("Tileset Palette");
   ImGui::Combo("New genre", &genre_, "Top-down RPG\0Platformer\0");
+  record_visual_control("New genre");
   ImGui::InputInt("New width", &width_);
+  record_visual_control("New width");
   ImGui::InputInt("New height", &height_);
+  record_visual_control("New height");
   ImGui::InputInt("Cell width", &level_tile_width_);
+  record_visual_control("Cell width");
   ImGui::InputInt("Cell height", &level_tile_height_);
+  record_visual_control("Cell height");
   if (ImGui::Button("New level")) {
     if (document_.dirty())
       confirm_new_ = true;
     else
       new_level();
   }
+  record_visual_control("New level");
   ImGui::Separator();
   ImGui::InputInt("Tile width", &tile_width_);
+  record_visual_control("Tile width");
   ImGui::InputInt("Tile height", &tile_height_);
+  record_visual_control("Tile height");
   if (ImGui::Button("Import PNG..."))
     request_tileset_dialog();
+  record_visual_control("Import tileset");
   ImGui::TextWrapped("Atlas: %s", tileset_path_);
   if (ImGui::Button("Load current atlas settings")) {
     try {
@@ -1410,6 +1533,7 @@ void Editor::draw() {
       report_error(e.what());
     }
   }
+  record_visual_control("Apply tileset settings");
   ImGui::Text("%s", tileset_.loaded() ? "PNG atlas ready" : "No atlas loaded");
   if (tileset_.loaded()) {
     const int count = std::min(tileset_.tile_count(), 255);
@@ -1423,6 +1547,8 @@ void Editor::draw() {
       ImGui::InvisibleButton("tile", ImVec2(38, 38));
       if (ImGui::IsItemClicked())
         selected_tile_ = i;
+      if (i <= per_row)
+        record_visual_control("Tile palette item");
       ImVec2 a(at.x + 3, at.y + 3), b(at.x + 35, at.y + 35);
       if (i == selected_tile_)
         list->AddRect(a, b, IM_COL32(255, 220, 96, 255), 0, 0, 2);
@@ -1438,6 +1564,8 @@ void Editor::draw() {
   if (tileset_.loaded())
     ImGui::SliderInt("Tile ID", &selected_tile_, 0,
                      std::min(tileset_.tile_count(), 255));
+  if (tileset_.loaded())
+    record_visual_control("Tile ID");
   ImGui::End();
   layers_panel();
   entity_inspector();
@@ -1464,6 +1592,7 @@ void Editor::draw() {
               document_.level().layers[static_cast<std::size_t>(active_layer_)]
                   .name.c_str(),
               cursor, tool_name(tool_), zoom_ * 100.0f, status_.c_str());
+  record_visual_control("Status details");
   ImGui::End();
   if (error_popup_pending_) {
     ImGui::OpenPopup("File operation failed");

@@ -4,11 +4,19 @@
 #include "tileset.hpp"
 #include <SDL3/SDL.h>
 #include <chrono>
+#include <array>
 #include <filesystem>
 #include <imgui.h>
 #include <memory>
+#include <string>
+#include <vector>
 namespace pf {
 struct DialogMailbox;
+struct VisualControlGeometry {
+  std::string window, label;
+  std::array<float, 4> bounds{}, clip_bounds{};
+  bool visible = false, clipped_horizontally = false;
+};
 enum class Tool {
   pencil,
   eraser,
@@ -18,6 +26,12 @@ enum class Tool {
   eyedropper,
   collision,
   entity
+};
+struct VisualGeometry {
+  float canvas_x = 0, canvas_y = 0, canvas_width = 0, canvas_height = 0;
+  float map_x = 0, map_y = 0, map_width = 0, map_height = 0;
+  float zoom = 1;
+  int map_width_tiles = 0, map_height_tiles = 0, ui_scale_percent = 100;
 };
 class Editor {
   Document document_;
@@ -36,6 +50,8 @@ class Editor {
   int level_tile_width_ = 24, level_tile_height_ = 24, entity_type_index_ = 1;
   float zoom_ = 1.0f, pan_x_ = 20, pan_y_ = 20;
   int ui_scale_percent_ = 100;
+  VisualGeometry visual_geometry_;
+  std::vector<VisualControlGeometry> visual_controls_;
   int cursor_cell_x_ = -1, cursor_cell_y_ = -1;
   bool cursor_on_level_ = false;
   bool grid_visible_ = true, stroke_active_ = false, gesture_active_ = false,
@@ -84,13 +100,28 @@ class Editor {
   bool save_level_to(const std::filesystem::path &path);
   void report_error(const std::string &message);
   void mark_dirty_status();
+  void record_visual_control(const char *label);
 
 public:
   explicit Editor(SDL_Renderer *renderer, float display_scale = 1.0f);
   void set_display_scale(float scale);
   void start_smoke_playtest(Genre genre);
   void stop_playtest();
+  void visual_load_demo(Genre genre, bool playtest);
+  void visual_create_large_map();
+  void visual_select_entity(std::uint64_t id);
+  void visual_step_gameplay(const gameplay::Input &input, int steps);
+  const gameplay::Player &visual_player() const;
+  const std::string &visual_gameplay_message() const;
+  void visual_show_welcome(bool visible) { show_welcome_ = visible; }
   bool assets_ready() const noexcept { return tileset_.loaded(); }
+  const VisualGeometry &visual_geometry() const noexcept {
+    return visual_geometry_;
+  }
+  const std::vector<VisualControlGeometry> &visual_controls() const noexcept {
+    return visual_controls_;
+  }
+  static bool visual_overflow_probe() noexcept;
   void request_close();
   bool should_close() const noexcept { return close_requested_; }
   void draw();
