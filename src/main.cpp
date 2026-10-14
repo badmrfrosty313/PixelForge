@@ -14,6 +14,21 @@ int main(int argc, char **argv) {
       }
       return pf::run(false, std::filesystem::path(argv[3]));
     }
+    if (argc > 1 && std::string_view(argv[1]) == "--interaction-test") {
+      if (argc < 3 || argc > 5) {
+        std::cerr << "Usage: PixelForge --interaction-test <scenario> [--output-dir <directory>]\n";
+        return 2;
+      }
+      std::filesystem::path output;
+      if (argc == 5) {
+        if (std::string_view(argv[3]) != "--output-dir") {
+          std::cerr << "Expected --output-dir <directory>\n";
+          return 2;
+        }
+        output = argv[4];
+      }
+      return pf::run(false, {}, argv[2], output);
+    }
     return pf::run(argc > 1 && std::string_view(argv[1]) == "--smoke");
   } catch (const std::exception &e) {
     std::cerr << "PixelForge: " << e.what() << '\n';

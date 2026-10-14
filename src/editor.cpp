@@ -154,10 +154,11 @@ void Editor::start_smoke_playtest(Genre genre) {
     throw std::runtime_error("Cannot load the packaged playtest example");
   playtest_ = std::make_unique<gameplay::Session>(document_.level());
   last_playtest_frame_ = std::chrono::steady_clock::now();
+  focus_canvas_ = true;
 }
 void Editor::stop_playtest() {
   playtest_.reset();
-  focus_editor_canvas_ = true;
+  focus_canvas_ = true;
 }
 void Editor::visual_load_demo(Genre genre, bool playtest) {
   show_welcome_ = false;
@@ -200,6 +201,19 @@ void Editor::visual_step_gameplay(const gameplay::Input &input, int steps) {
     throw std::runtime_error("Visual gameplay scenario needs an active playtest");
   for (int i = 0; i < steps; ++i)
     playtest_->step(input);
+}
+void Editor::visual_load_path(const std::filesystem::path &path) {
+  show_welcome_ = false;
+  open_path(path);
+}
+void Editor::visual_cancel_pending_dialog_for_test() {
+  if (!interaction_test_mode_ || !dialog_pending_)
+    throw std::logic_error("No interaction-test file dialog is pending");
+  DialogMailbox::Result result;
+  result.action = static_cast<int>(DialogAction::save_level);
+  result.canceled = true;
+  std::lock_guard lock(dialog_mailbox_->mutex);
+  dialog_mailbox_->result = std::move(result);
 }
 const gameplay::Player &Editor::visual_player() const {
   if (!playtest_)
@@ -253,7 +267,7 @@ void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
   ImGui::DockBuilderDockWindow("Status", bottom);
   ImGui::DockBuilderFinish(dockspace_id);
   reset_layout_requested_ = false;
-  focus_editor_canvas_ = true;
+  focus_canvas_ = true;
 }
 void Editor::request_open_dialog() {
   if (dialog_pending_)
@@ -268,6 +282,10 @@ void Editor::request_save_dialog(SaveIntent intent) {
   if (dialog_pending_)
     return;
   save_intent_ = intent;
+  if (interaction_test_mode_) {
+    dialog_pending_ = true;
+    return;
+  }
   auto *ticket = new DialogTicket{dialog_mailbox_, DialogAction::save_level};
   dialog_pending_ = true;
   SDL_ShowSaveFileDialog(file_dialog_callback, ticket,
@@ -451,10 +469,13 @@ void Editor::import_tileset(const std::filesystem::path &path) {
   }
 }
 void Editor::request_close() {
-  if (document_.dirty())
+  if (document_.dirty()) {
+    if (!confirm_close_)
+      defer_close_prompt_ = true;
     confirm_close_ = true;
-  else
+  } else {
     close_requested_ = true;
+  }
 }
 void Editor::open_path(const std::filesystem::path &path) {
   try {
@@ -515,8 +536,12 @@ void Editor::new_level() {
   }
 }
 void Editor::toolbar() {
+  exit_menu_activated_this_frame_ = false;
   if (ImGui::BeginMainMenuBar()) {
-    if (ImGui::BeginMenu("File")) {
+    const bool file_menu_open = ImGui::BeginMenu("File");
+    if (interaction_test_mode_ && !file_menu_open)
+      record_visual_control("File menu");
+    if (file_menu_open) {
       if (ImGui::MenuItem("New", "Ctrl+N")) {
         if (document_.dirty())
           confirm_new_ = true;
@@ -536,8 +561,11 @@ void Editor::toolbar() {
                           !dialog_pending_))
         request_tileset_dialog();
       ImGui::Separator();
-      if (ImGui::MenuItem("Exit"))
+      if (ImGui::MenuItem("Exit")) {
+        exit_menu_activated_this_frame_ = true;
         request_close();
+      }
+      record_visual_control("Exit menu item");
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
@@ -603,6 +631,7 @@ void Editor::toolbar() {
           }
           playtest_ = std::make_unique<gameplay::Session>(document_.level());
           last_playtest_frame_ = std::chrono::steady_clock::now();
+          focus_canvas_ = true;
         } catch (const std::exception &error) {
           status_ = error.what();
         }
@@ -731,8 +760,12 @@ void Editor::toolbar() {
     ImGui::EndPopup();
   }
   if (confirm_close_) {
-    ImGui::OpenPopup("Save changes before exit?");
-    confirm_close_ = false;
+    if (defer_close_prompt_) {
+      defer_close_prompt_ = false;
+    } else {
+      ImGui::OpenPopup("Save changes before exit?");
+      confirm_close_ = false;
+    }
   }
   if (ImGui::BeginPopupModal("Save changes before exit?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -746,17 +779,20 @@ void Editor::toolbar() {
         ImGui::CloseCurrentPopup();
       }
     }
+    record_visual_control("Save and exit");
     ImGui::SameLine();
     if (ImGui::Button("Discard and exit")) {
       close_requested_ = true;
       confirm_close_ = false;
       ImGui::CloseCurrentPopup();
     }
+    record_visual_control("Discard and exit");
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {
       confirm_close_ = false;
       ImGui::CloseCurrentPopup();
     }
+    record_visual_control("Cancel close");
     ImGui::EndPopup();
   }
 }
@@ -962,17 +998,21 @@ void Editor::entity_inspector() {
   ImGui::End();
 }
 void Editor::canvas() {
+  const bool request_focus = focus_canvas_;
   if (playtest_) {
     cursor_on_level_ = false;
-    ImGui::SetNextWindowFocus();
-    playtest_canvas();
+    if (request_focus)
+      ImGui::SetNextWindowFocus();
+    focus_canvas_ = false;
+    playtest_canvas(request_focus);
     return;
   }
-  if (focus_editor_canvas_) {
+  if (request_focus)
     ImGui::SetNextWindowFocus();
-    focus_editor_canvas_ = false;
-  }
+  focus_canvas_ = false;
   ImGui::Begin("Level Canvas");
+  if (request_focus)
+    ImGui::SetKeyboardFocusHere();
   ImVec2 pos = ImGui::GetCursorScreenPos(),
          size = ImGui::GetContentRegionAvail();
   size.x = std::max(size.x, 1.0f);
@@ -1280,14 +1320,17 @@ void Editor::canvas() {
   draw->PopClipRect();
   ImGui::End();
 }
-void Editor::playtest_canvas() {
-  ImGui::Begin("Playtest");
+void Editor::playtest_canvas(bool request_focus) {
+  ImGui::Begin("Level Canvas");
+  if (request_focus)
+    ImGui::SetKeyboardFocusHere();
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   ImVec2 size = ImGui::GetContentRegionAvail();
   size.x = std::max(size.x, 1.0f);
   size.y = std::max(size.y, 1.0f);
   ImGui::InvisibleButton("runtime-canvas", size);
-  const bool focused = ImGui::IsItemFocused();
+  const bool focused = ImGui::IsWindowFocused(
+      ImGuiFocusedFlags_RootAndChildWindows);
   const auto now = std::chrono::steady_clock::now();
   const float elapsed =
       std::chrono::duration<float>(now - last_playtest_frame_).count();

@@ -79,9 +79,12 @@ class Editor {
        close_open_popup_ = false;
   bool error_popup_pending_ = false;
   bool show_welcome_ = true;
-  bool confirm_new_ = false, confirm_open_ = false, confirm_close_ = false;
+  bool confirm_new_ = false, confirm_open_ = false, confirm_close_ = false,
+       defer_close_prompt_ = false;
   bool close_requested_ = false;
-  bool reset_layout_requested_ = false, focus_editor_canvas_ = false;
+  bool reset_layout_requested_ = false, focus_canvas_ = false;
+  bool interaction_test_mode_ = false;
+  bool exit_menu_activated_this_frame_ = false;
   void apply_ui_scale(int percent);
   void set_default_layout(ImGuiID dockspace_id, bool force);
   void request_open_dialog();
@@ -91,7 +94,7 @@ class Editor {
   void toolbar();
   void layers_panel();
   void canvas();
-  void playtest_canvas();
+  void playtest_canvas(bool request_focus);
   void entity_inspector();
   void sync_entity_fields();
   void set_active_layer(int index);
@@ -113,6 +116,17 @@ public:
   void visual_create_large_map();
   void visual_select_entity(std::uint64_t id);
   void visual_step_gameplay(const gameplay::Input &input, int steps);
+  void visual_load_path(const std::filesystem::path &path);
+  void visual_enable_interaction_test() noexcept {
+    interaction_test_mode_ = true;
+  }
+  void visual_cancel_pending_dialog_for_test();
+  bool visual_playtest_active() const noexcept { return !!playtest_; }
+  bool visual_document_dirty() const noexcept { return document_.dirty(); }
+  bool visual_dialog_pending() const noexcept { return dialog_pending_; }
+  bool visual_exit_menu_activated() const noexcept {
+    return exit_menu_activated_this_frame_;
+  }
   const gameplay::Player &visual_player() const;
   const std::string &visual_gameplay_message() const;
   void visual_show_welcome(bool visible) { show_welcome_ = visible; }

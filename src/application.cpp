@@ -1,5 +1,6 @@
 #include "application.hpp"
 #include "editor.hpp"
+#include "serialization.hpp"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -11,6 +12,11 @@
 #include <sstream>
 #include <vector>
 #include <cmath>
+#include <chrono>
+#include <algorithm>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <nlohmann/json.hpp>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -80,9 +86,425 @@ struct Gui {
     ImGui::DestroyContext();
   }
 };
+
+class InteractionDriver {
+  enum class ActionKind { click, window_close, resize_scale, move_right,
+                          cancel_dialog };
+  struct Action {
+    ActionKind kind;
+    std::string control;
+  };
+  std::string scenario_;
+  std::filesystem::path output_;
+  std::filesystem::path temp_level_;
+  std::string original_level_contents_;
+  std::vector<Action> actions_;
+  std::size_t next_action_ = 0;
+  std::string verify_control_;
+  int frame_ = 0, release_wait_ = 0, move_frames_ = 0, layout_wait_ = 0,
+      startup_wait_ = 3;
+  bool mouse_down_queued_ = false, key_down_ = false, done_ = false;
+  bool hover_pending_ = false;
+  float mouse_x_ = 0, mouse_y_ = 0;
+  bool expect_exit_ = false, expect_save_ = false, expect_dirty_ = false;
+  bool active_capture_ = false, restored_capture_ = false;
+  bool played_ = false, moved_ = false;
+  float player_x_before_move_ = 0;
+  std::size_t initial_layer_count_ = 0;
+  std::chrono::steady_clock::time_point started_ =
+      std::chrono::steady_clock::now();
+
+  static void queue_mouse(SDL_Window *window, float x, float y,
+                          bool down) {
+    const auto id = SDL_GetWindowID(window);
+    SDL_WarpMouseInWindow(window, x, y);
+    SDL_Event motion{};
+    motion.type = SDL_EVENT_MOUSE_MOTION;
+    motion.motion.windowID = id;
+    motion.motion.x = x;
+    motion.motion.y = y;
+    if (!SDL_PushEvent(&motion))
+      throw std::runtime_error(SDL_GetError());
+    SDL_Event button{};
+    button.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN
+                       : SDL_EVENT_MOUSE_BUTTON_UP;
+    button.button.windowID = id;
+    button.button.button = SDL_BUTTON_LEFT;
+    button.button.down = down;
+    button.button.clicks = 1;
+    button.button.x = x;
+    button.button.y = y;
+    if (!SDL_PushEvent(&button))
+      throw std::runtime_error(SDL_GetError());
+  }
+  static void queue_hover(SDL_Window *window, float x, float y) {
+    SDL_WarpMouseInWindow(window, x, y);
+    SDL_Event motion{};
+    motion.type = SDL_EVENT_MOUSE_MOTION;
+    motion.motion.windowID = SDL_GetWindowID(window);
+    motion.motion.x = x;
+    motion.motion.y = y;
+    if (!SDL_PushEvent(&motion))
+      throw std::runtime_error(SDL_GetError());
+  }
+  static void queue_close(SDL_Window *window) {
+    SDL_Event event{};
+    event.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+    event.window.windowID = SDL_GetWindowID(window);
+    if (!SDL_PushEvent(&event))
+      throw std::runtime_error(SDL_GetError());
+  }
+  static void queue_key(SDL_Window *window, bool down) {
+    SDL_Event event{};
+    event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    event.key.windowID = SDL_GetWindowID(window);
+    event.key.key = SDLK_RIGHT;
+    event.key.scancode = SDL_SCANCODE_RIGHT;
+    event.key.mod = SDL_KMOD_NONE;
+    event.key.down = down;
+    event.key.repeat = false;
+    if (!SDL_PushEvent(&event))
+      throw std::runtime_error(SDL_GetError());
+  }
+  const VisualControlGeometry *find_control(const Editor &editor,
+                                             std::string_view label) const {
+    for (const auto &control : editor.visual_controls())
+      if (control.label == label && control.visible &&
+          control.bounds[2] > control.bounds[0] &&
+          control.bounds[3] > control.bounds[1])
+        return &control;
+    return nullptr;
+  }
+  void capture(SDL_Renderer *renderer, const std::filesystem::path &path) {
+    if (output_.empty())
+      return;
+    SDL_Surface *surface = SDL_RenderReadPixels(renderer, nullptr);
+    if (!surface)
+      throw std::runtime_error(std::string("Interaction screenshot read failed: ") + SDL_GetError());
+    SDL_Surface *rgba = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(surface);
+    if (!rgba)
+      throw std::runtime_error(std::string("Interaction screenshot conversion failed: ") + SDL_GetError());
+    const bool written = stbi_write_png(path.string().c_str(), rgba->w, rgba->h,
+                                       4, rgba->pixels, rgba->pitch) != 0;
+    SDL_DestroySurface(rgba);
+    if (!written)
+      throw std::runtime_error("Could not write interaction screenshot");
+  }
+  bool is_transition() const {
+    return scenario_ == "transition-rpg" ||
+           scenario_ == "transition-platformer";
+  }
+  bool is_dirty_scenario() const {
+    return scenario_.starts_with("file-dirty-") ||
+           scenario_.starts_with("window-dirty-") ||
+           scenario_ == "dirty-playtest-discard";
+  }
+  void configure(Editor &editor) {
+    editor.visual_enable_interaction_test();
+    if (is_transition()) {
+      const auto genre = scenario_ == "transition-rpg"
+                             ? Genre::top_down_rpg : Genre::platformer;
+      editor.visual_load_demo(genre, false);
+      expect_dirty_ = true;
+      actions_ = {{ActionKind::click, "Add layer"},
+                  {ActionKind::click, "Play"},
+                  {ActionKind::move_right, {}},
+                  {ActionKind::click, "Pause/Resume"},
+                  {ActionKind::click, "Reset"},
+                  {ActionKind::resize_scale, {}},
+                  {ActionKind::click, "Stop"},
+                  {ActionKind::click, "Play"},
+                  {ActionKind::click, "Stop"}};
+      return;
+    }
+    if (scenario_ == "exit-file-clean") {
+      actions_ = {{ActionKind::click, "File menu"},
+                  {ActionKind::click, "Exit menu item"}};
+      expect_exit_ = true;
+    } else if (scenario_ == "exit-window-clean") {
+      actions_ = {{ActionKind::window_close, {}}};
+      expect_exit_ = true;
+    } else if (scenario_ == "exit-playtest") {
+      editor.visual_load_demo(Genre::top_down_rpg, false);
+      actions_ = {{ActionKind::click, "Play"},
+                  {ActionKind::window_close, {}}};
+      expect_exit_ = true;
+    } else if (is_dirty_scenario()) {
+      const auto source = std::filesystem::path(PIXELFORGE_SOURCE_ASSET_DIR)
+                              .parent_path() / "examples/rpg.json";
+      temp_level_ = std::filesystem::temp_directory_path() /
+                    ("PixelForge-interaction-" + scenario_ + ".json");
+      std::filesystem::copy_file(source, temp_level_,
+                                 std::filesystem::copy_options::overwrite_existing);
+      std::ifstream initial(temp_level_, std::ios::binary);
+      original_level_contents_.assign(std::istreambuf_iterator<char>(initial),
+                                      std::istreambuf_iterator<char>());
+      editor.visual_load_path(temp_level_);
+      const auto level = load(temp_level_);
+      initial_layer_count_ = level.layers.size();
+      if (scenario_ == "dirty-playtest-discard") {
+        actions_ = {{ActionKind::click, "Add layer"},
+                    {ActionKind::click, "Play"},
+                    {ActionKind::window_close, {}},
+                    {ActionKind::click, "Discard and exit"}};
+        expect_exit_ = true;
+      } else if (scenario_ == "window-dirty-discard") {
+        actions_ = {{ActionKind::click, "Add layer"},
+                    {ActionKind::window_close, {}},
+                    {ActionKind::click, "Discard and exit"}};
+        expect_exit_ = true;
+      } else if (scenario_ == "window-dirty-save") {
+        actions_ = {{ActionKind::click, "Add layer"},
+                    {ActionKind::window_close, {}},
+                    {ActionKind::click, "Save and exit"}};
+        expect_exit_ = true;
+        expect_save_ = true;
+      } else if (scenario_ == "window-dirty-cancel") {
+        actions_ = {{ActionKind::click, "Add layer"},
+                    {ActionKind::window_close, {}},
+                    {ActionKind::click, "Cancel close"}};
+        expect_dirty_ = true;
+      } else if (scenario_ == "file-dirty-cancel") {
+        actions_ = {{ActionKind::click, "Add layer"},
+                    {ActionKind::click, "File menu"},
+                    {ActionKind::click, "Exit menu item"},
+                    {ActionKind::click, "Cancel close"}};
+        expect_dirty_ = true;
+      } else if (scenario_ == "file-dirty-save") {
+        actions_ = {{ActionKind::click, "Add layer"},
+                    {ActionKind::click, "File menu"},
+                    {ActionKind::click, "Exit menu item"},
+                    {ActionKind::click, "Save and exit"}};
+        expect_exit_ = true;
+        expect_save_ = true;
+      } else {
+        throw std::runtime_error("Unknown dirty interaction scenario: " + scenario_);
+      }
+      return;
+    } else if (scenario_ == "save-dialog-cancel") {
+      editor.visual_create_large_map();
+      initial_layer_count_ = 1;
+      actions_ = {{ActionKind::click, "Add layer"},
+                  {ActionKind::click, "File menu"},
+                  {ActionKind::click, "Exit menu item"},
+                  {ActionKind::click, "Save and exit"},
+                  {ActionKind::cancel_dialog, {}},
+                  {ActionKind::click, "Cancel close"}};
+      expect_dirty_ = true;
+      return;
+    } else {
+      throw std::runtime_error("Unknown interaction-test scenario: " + scenario_);
+    }
+  }
+  void validate_complete(const Editor &editor) {
+    if (expect_exit_ && !editor.should_close())
+      throw std::runtime_error("Interaction scenario did not close the application");
+    if (!expect_exit_ && editor.should_close())
+      throw std::runtime_error("Cancel/stop scenario unexpectedly requested application close");
+    if (expect_dirty_ && !editor.visual_document_dirty())
+      throw std::runtime_error("Interaction scenario lost unsaved document edits");
+    if (expect_save_) {
+      if (editor.visual_document_dirty())
+        throw std::runtime_error("Save and Exit closed with a dirty document");
+      const auto saved = load(temp_level_);
+      if (saved.layers.size() != initial_layer_count_ + 1 ||
+          saved.layers.back().name != "Layer")
+        throw std::runtime_error("Save and Exit did not persist the added layer");
+    }
+    if ((scenario_ == "exit-playtest" ||
+         scenario_ == "dirty-playtest-discard") &&
+        !editor.visual_playtest_active())
+      throw std::runtime_error("Close request was not exercised during playtest");
+    if (!temp_level_.empty() && !expect_save_) {
+      std::ifstream current(temp_level_, std::ios::binary);
+      const std::string contents{std::istreambuf_iterator<char>(current),
+                                 std::istreambuf_iterator<char>()};
+      if (contents != original_level_contents_)
+        throw std::runtime_error("Discard/Cancel changed the saved document");
+    }
+    if (is_transition()) {
+      if (editor.visual_playtest_active() ||
+          !find_control(editor, "Play") || find_control(editor, "Stop"))
+        throw std::runtime_error("Stop did not restore the editor toolbar");
+      if (!editor.visual_document_dirty())
+        throw std::runtime_error("Playtest transition lost the unsaved editor change");
+      if (output_.empty() || !active_capture_ || !restored_capture_)
+        throw std::runtime_error("Transition screenshots were not captured");
+      if (!moved_)
+        throw std::runtime_error("SDL keyboard input did not move the playtest character");
+    }
+    done_ = true;
+  }
+  void verify_click(const Editor &editor) {
+    if (verify_control_.empty())
+      return;
+    const auto control = std::exchange(verify_control_, {});
+    if (control == "Add layer" && !editor.visual_document_dirty())
+      throw std::runtime_error("Add layer UI input did not modify the document");
+    if (control == "Play" && !editor.visual_playtest_active())
+      throw std::runtime_error("Play UI input did not start a session");
+    if (control == "Stop" && editor.visual_playtest_active())
+      throw std::runtime_error("Stop UI input did not return to editor mode");
+    if (control == "File menu" && !find_control(editor, "Exit menu item"))
+      throw std::runtime_error("File menu did not open from SDL mouse input");
+    if (control == "Exit menu item" && !editor.should_close() &&
+        !find_control(editor, "Cancel close") &&
+        !editor.visual_exit_menu_activated()) {
+      throw std::runtime_error("Exit did not close or queue the unsaved-changes prompt");
+    }
+    if (control == "Discard and exit" && !editor.should_close())
+      throw std::runtime_error("Discard and Exit did not request shutdown");
+    if (control == "Save and exit" && !editor.should_close() &&
+        !editor.visual_dialog_pending())
+      throw std::runtime_error("Save and Exit did not save or request a Save dialog");
+    if (control == "Cancel close" &&
+        (!find_control(editor, "Play") || editor.should_close()))
+      throw std::runtime_error("Cancel did not return to an interactive editor");
+  }
+
+public:
+  InteractionDriver(std::string_view scenario, std::filesystem::path output,
+                    Editor &editor)
+      : scenario_(scenario), output_(std::move(output)) {
+    configure(editor);
+    if (!output_.empty())
+      std::filesystem::create_directories(output_);
+  }
+  ~InteractionDriver() {
+    if (!temp_level_.empty()) {
+      std::error_code error;
+      std::filesystem::remove(temp_level_, error);
+    }
+  }
+  bool done() const noexcept { return done_; }
+  void on_application_close(Editor &editor) {
+    if (!expect_exit_)
+      throw std::runtime_error("Application closed during a cancel or transition test");
+    if (next_action_ < actions_.size())
+      throw std::runtime_error("Application exited before the interaction script completed");
+    validate_complete(editor);
+  }
+  void after_present(Editor &editor, SDL_Window *window,
+                     SDL_Renderer *renderer) {
+    ++frame_;
+    if (std::chrono::steady_clock::now() - started_ > std::chrono::seconds(12))
+      throw std::runtime_error("Timed out waiting for user-driven interaction test");
+    if (is_transition()) {
+      if (editor.visual_playtest_active() && find_control(editor, "Stop") &&
+          !active_capture_) {
+        capture(renderer, output_ / "playtest-active.png");
+        active_capture_ = true;
+      } else if (active_capture_ && !editor.visual_playtest_active() &&
+                 find_control(editor, "Play") && !restored_capture_) {
+        capture(renderer, output_ / "editor-restored-after-stop.png");
+        restored_capture_ = true;
+      }
+    }
+    verify_click(editor);
+    if (done_)
+      return;
+    if (hover_pending_) {
+      queue_mouse(window, mouse_x_, mouse_y_, true);
+      hover_pending_ = false;
+      mouse_down_queued_ = true;
+      return;
+    }
+    if (startup_wait_ > 0) {
+      --startup_wait_;
+      return;
+    }
+    if (mouse_down_queued_) {
+      const auto &action = actions_.at(next_action_);
+      queue_mouse(window, mouse_x_, mouse_y_, false);
+      if (action.kind == ActionKind::click)
+        verify_control_ = action.control;
+      mouse_down_queued_ = false;
+      ++next_action_;
+      release_wait_ = 1;
+      return;
+    }
+    if (release_wait_ > 0) {
+      --release_wait_;
+      return;
+    }
+    if (next_action_ >= actions_.size()) {
+      if (expect_exit_) {
+        if (frame_ > 12)
+          throw std::runtime_error("Exit action did not terminate the application");
+        return;
+      }
+      if (!find_control(editor, "Play"))
+        return;
+      validate_complete(editor);
+      return;
+    }
+    auto &action = actions_[next_action_];
+    switch (action.kind) {
+    case ActionKind::window_close:
+      queue_close(window);
+      ++next_action_;
+      release_wait_ = 1;
+      return;
+    case ActionKind::resize_scale:
+      if (layout_wait_ == 0) {
+        if (!SDL_SetWindowSize(window, 1280, 720))
+          throw std::runtime_error(SDL_GetError());
+        editor.set_display_scale(1.5f);
+        layout_wait_ = 4;
+      }
+      if (--layout_wait_ == 0)
+        ++next_action_;
+      return;
+    case ActionKind::move_right:
+      if (move_frames_ == 0 && !key_down_) {
+        player_x_before_move_ = editor.visual_player().x;
+        queue_key(window, true);
+        key_down_ = true;
+        move_frames_ = 12;
+      } else if (move_frames_ > 0) {
+        SDL_Delay(17);
+        if (--move_frames_ == 0) {
+          queue_key(window, false);
+          key_down_ = false;
+          moved_ = editor.visual_player().x > player_x_before_move_ + 0.02f;
+          if (!moved_)
+            throw std::runtime_error("Playtest did not respond to SDL right-arrow input");
+          ++next_action_;
+          release_wait_ = 1;
+        }
+      }
+      return;
+    case ActionKind::cancel_dialog:
+      if (editor.visual_dialog_pending()) {
+        editor.visual_cancel_pending_dialog_for_test();
+        ++next_action_;
+        release_wait_ = 1;
+      }
+      return;
+    case ActionKind::click: {
+      const auto *control = find_control(editor, action.control);
+      if (!control)
+        return;
+      const float x = (control->bounds[0] + control->bounds[2]) * 0.5f;
+      const float y = (control->bounds[1] + control->bounds[3]) * 0.5f;
+      queue_hover(window, x, y);
+      mouse_x_ = x;
+      mouse_y_ = y;
+      hover_pending_ = true;
+      return;
+    }
+    }
+  }
+};
 } // namespace
-int run(bool smoke, const std::filesystem::path &visual_output) {
+int run(bool smoke, const std::filesystem::path &visual_output,
+        std::string_view interaction_test,
+        const std::filesystem::path &interaction_output) {
   const bool visual = !visual_output.empty();
+  const bool interaction = !interaction_test.empty();
+  if (interaction && (smoke || visual))
+    throw std::invalid_argument("Interaction tests cannot run with smoke/visual modes");
   if (visual)
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
   if (visual) {
@@ -105,7 +527,7 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
       SDL_CreateRenderer(window.get(), nullptr), SDL_DestroyRenderer);
   if (!renderer)
     throw std::runtime_error(SDL_GetError());
-  SDL_SetRenderVSync(renderer.get(), 1);
+  SDL_SetRenderVSync(renderer.get(), interaction ? 0 : 1);
   Gui gui;
   if (!(gui.platform =
             ImGui_ImplSDL3_InitForSDLRenderer(window.get(), renderer.get())))
@@ -115,6 +537,10 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
   if (smoke)
     ImGui::GetIO().IniFilename = nullptr;
   Editor editor(renderer.get(), SDL_GetWindowDisplayScale(window.get()));
+  std::unique_ptr<InteractionDriver> interaction_driver;
+  if (interaction)
+    interaction_driver = std::make_unique<InteractionDriver>(
+        interaction_test, interaction_output, editor);
   if (smoke && !editor.assets_ready())
     throw std::runtime_error("Built-in PNG tileset did not load");
   bool running = true;
@@ -418,14 +844,18 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
       ImGui_ImplSDL3_ProcessEvent(&event);
       if (event.type == SDL_EVENT_QUIT ||
           (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
-           event.window.windowID == SDL_GetWindowID(window.get())))
+           (event.window.windowID == SDL_GetWindowID(window.get()) ||
+            event.window.windowID == 0)))
         editor.request_close();
       if (event.type == SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED &&
           event.window.windowID == SDL_GetWindowID(window.get()))
         editor.set_display_scale(SDL_GetWindowDisplayScale(window.get()));
     }
-    if (editor.should_close())
+    if (editor.should_close()) {
+      if (interaction_driver)
+        interaction_driver->on_application_close(editor);
       running = false;
+    }
     if (!running)
       break;
     if (smoke && frames < 4) {
@@ -448,8 +878,16 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer.get());
     if (!SDL_RenderPresent(renderer.get()))
       throw std::runtime_error(SDL_GetError());
-    if (editor.should_close())
+    if (interaction_driver) {
+      interaction_driver->after_present(editor, window.get(), renderer.get());
+      if (interaction_driver->done())
+        running = false;
+    }
+    if (editor.should_close()) {
+      if (interaction_driver)
+        interaction_driver->on_application_close(editor);
       running = false;
+    }
     if (smoke && ++frames == 4)
       running = false;
   }

@@ -2,6 +2,14 @@
 
 This checklist records observed evidence, not intended behavior. At the initial audit, the Beta branch pointed to `687b4cc197670ab53f690eeaa64f401cb0ec448d`; its successful hosted run [38631871411](https://github.com/badmrfrosty313/PixelForge/actions/runs/38631871411) predates the release-preparation changes. The first final-candidate run exposed a contact-sheet resolution assumption, which was corrected in `751838443cf86e6bea9c4e01b049c9f8f7d11bd4`.
 
+## RC2 interaction regression evidence
+
+Windows acceptance testing found that Stop could leave the editor canvas hidden or unfocused, and dirty exit through the File menu did not reliably show its confirmation prompt. The canvas had two dock-window identities for edit and playtest, and playtest requested focus on every frame. The editor now uses one canvas identity and transfers focus only on transitions. The dirty-exit modal is queued until the File menu popup has closed. Runtime shutdown ordering was already scoped correctly; the observed failure was in the close interaction path.
+
+The SDL event-driven interaction suite covers both genres, play/pause/reset/stop and restored editor controls, clean close paths, dirty Save/Discard/Cancel choices from menu and window-close requests, close while playing, and canceled save-dialog handling. It produces active-playtest and restored-editor screenshots for both genres. The local current-revision run passed all 16 CTest targets, the 192-capture Visual QA run passed 17,877 layout/gameplay assertions with zero failures, and the core ASan/UBSan run passed 3/3 targets. The sanitizer configuration excludes the SDL/ImGui editor. These checks use SDL's dummy/offscreen video drivers; physical Windows input, the actual Windows title bar, and native OS dialog behavior still need manual verification.
+
+The pushed RC2 source revision and hosted Windows/Ubuntu results, package artifact URL, ZIP size, and fresh checksum are recorded below after CI completes.
+
 ## Verified locally on the release-preparation worktree
 
 - **Repository:** Beta branch `codex/pixelforge-studio-beta`, base HEAD `687b4cc197670ab53f690eeaa64f401cb0ec448d`; working tree began clean. All three stacked pull requests were open at the time of audit.
