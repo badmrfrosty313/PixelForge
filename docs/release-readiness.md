@@ -2,6 +2,14 @@
 
 This checklist records observed evidence, not intended behavior. At the initial audit, the Beta branch pointed to `687b4cc197670ab53f690eeaa64f401cb0ec448d`; its successful hosted run [38631871411](https://github.com/badmrfrosty313/PixelForge/actions/runs/38631871411) predates the release-preparation changes. The first final-candidate run exposed a contact-sheet resolution assumption, which was corrected in `751838443cf86e6bea9c4e01b049c9f8f7d11bd4`.
 
+## v1.0.0 license and acceptance update (October 14, 2026)
+
+- **MIT approved:** Repository owner explicitly approved the MIT License with `Copyright (c) 2026 badmrfrosty313`. The root `LICENSE` file is committed on the Studio Beta release-preparation branch.
+- **Manual Windows acceptance passed:** The owner confirmed RC2 passed the actual Windows interactive acceptance checklist, including Play/Stop, window and File-menu exit, unsaved-change handling, and native file dialogs.
+- **Package updated:** CMake now installs the root MIT LICENSE and final release notes; Windows CI checks the copyright notice and packages `PixelForge-v1.0.0-windows-x64.zip` with a generated SHA-256.
+- **Pending:** Passing hosted Windows, Ubuntu, sanitizer and package checks on the final licensed revision; maintainer approval for the stacked PR merges and release publication. This preparation does not merge or publish anything.
+- **Visual baselines:** Optional follow-on improvement; not a blocker for v1.0.0. Native screenshots and geometry assertions already run in CI.
+
 ## RC2 interaction regression evidence
 
 Windows acceptance testing found that Stop could leave the editor canvas hidden or unfocused, and dirty exit through the File menu did not reliably show its confirmation prompt. The canvas had two dock-window identities for edit and playtest, and playtest requested focus on every frame. The editor now uses one canvas identity and transfers focus only on transitions. The dirty-exit modal is queued until the File menu popup has closed. Runtime shutdown ordering was already scoped correctly; the observed failure was in the close interaction path.
@@ -27,19 +35,17 @@ The exact release-preparation head `751838443cf86e6bea9c4e01b049c9f8f7d11bd4` pa
 
 The Windows job produced `PixelForge-v1.0.0-windows-x64.zip` (1,970,049 bytes), SHA-256 `bd17eb533b660da8e25db59666bb6b768c37a48dca39ee8c2b09bc2b53b6f172`, plus its checksum file. The uploaded [RC artifact](https://github.com/badmrfrosty313/PixelForge/actions/runs/38638860039/artifacts/11929985732) is retained for 14 days. This artifact is a temporary CI download, not a published release.
 
-## Human acceptance required
+## Remaining release gates
 
-- On Windows, launch the extracted release-candidate ZIP and check default layout, scale and resize behavior, both demos, movement/jump/collision, entity and collision editing, paint/erase, undo/redo, Save As, reopen, and dirty-document prompts.
-- Exercise the native Open, Save As, and Import PNG dialogs. Current smoke tests cannot automate their operating-system UI.
-- Review and approve screenshots as baselines before enabling pixel-diff enforcement. Current geometry checks do not prove visual taste or approve a screenshot.
-- Confirm packaged asset resolution and test the versioned ZIP and checksum produced by the final hosted Windows run.
+1. **Final licensed CI validation — pending.** Verify Windows and Ubuntu 16/16 CTest runs, sanitizer 3/3, Visual QA, and Windows package smoke on the exact new branch revision.
+2. **Release package checksum — pending.** Confirm SHA-256 for the newly built licensed ZIP and verify that `LICENSE`, release notes, and third-party notices are in the archive.
+3. **PR integration and publication approval — pending.** Review and merge PR #1, then #2, then #3 after rechecking dependencies and mergeability. Obtain explicit authorization before creating the final tag or GitHub Release.
+4. **Approved screenshot baselines — deferred.** Baseline pixel-diff approval is optional for the initial release.
 
-## Release blockers
+### Completed gate: Windows manual acceptance
 
-1. **Project license approval — blocking.** There is no root `LICENSE`. The MIT text is a proposal in `proposed-MIT-license.md`; the copyright holder and selection require maintainer approval. Do not package a project license or publish until approved.
-2. **Manual Windows acceptance — blocking for public release.** Native dialogs and interactive editing have not been verified by a person on a Windows desktop.
-3. **Visual baseline approval — non-blocking for RC review, required before enforcing screenshot diffs.** No baseline is silently accepted.
-4. **Publication approval — blocking.** PRs must be reviewed and merged in dependency order; final tag and GitHub Release require explicit maintainer authorization.
+The repository owner confirmed that PixelForge RC2 passed Windows manual acceptance on October 14, 2026. The reported Stop/Exit regressions are fixed and the release candidate was exercised with real mouse and keyboard input. Manual acceptance is not being reported as evidence of the new licensed ZIP until that artifact is available.
+
 
 ## Stacked pull requests and merge plan
 
@@ -51,16 +57,6 @@ At the repository audit, the PR stack was:
 
 Proposed order after maintainer review: merge #1, retarget/review and merge #2, then retarget/review and merge #3. Recheck live ancestry and CI at each step. No PR has been merged by this campaign.
 
-## Final manual Windows acceptance checklist
+## Windows regression checklist for future changes
 
-1. Download the release-candidate artifact and verify its SHA-256 file.
-2. Extract the ZIP and launch `PixelForge.exe`.
-3. Confirm the default workspace is readable; resize the window and check 100%, 125%, 150%, and 200% scaling.
-4. Load the RPG demo, move with WASD/arrows, and interact with Mira.
-5. Return to editing; paint and erase tiles, then undo and redo.
-6. Use Save As, reopen the saved level, and confirm the map and entities are unchanged.
-7. Load the platformer demo; run, jump, and confirm landing and exact ground contact.
-8. Test the hazard respawn, checkpoint, and finish.
-9. Exercise native Open, Save As, and Import PNG dialogs; close the app.
-
-Automated coverage does not substitute for this Windows desktop pass. Do not report these manual steps as complete until a maintainer performs them.
+RC2 manual acceptance passed on October 14, 2026. If a later code change affects interactive behavior, recheck Play/Stop in both genres, File → Exit, title-bar X, dirty-document Save/Discard/Cancel, and Open/Save As/Import PNG dialogs. Pure license/documentation/packaging changes require fresh CI and ZIP verification rather than a full new gameplay acceptance pass.
