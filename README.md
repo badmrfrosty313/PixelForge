@@ -14,7 +14,7 @@ These are PNG captures read from the running PixelForge application, at 1662×89
 
 ## Windows download
 
-The release candidate is built by GitHub Actions on Windows. Download the `PixelForge-v1.0.0-rc1-windows-x64` artifact from a successful run in [Actions](https://github.com/badmrfrosty313/PixelForge/actions/workflows/build.yml). It contains `PixelForge-v1.0.0-windows-x64.zip` and its SHA-256 file. Extract the ZIP and run `PixelForge.exe` from the extracted folder. No GitHub Release or final v1.0.0 tag has been published; the project-wide license is still awaiting maintainer approval.
+The licensed v1.0.0 Windows package is prepared by [GitHub Actions](https://github.com/badmrfrosty313/PixelForge/actions/workflows/build.yml). Download the `PixelForge-v1.0.0-prepublish-windows-x64` artifact from a successful run on the latest release-preparation revision. It contains `PixelForge-v1.0.0-windows-x64.zip` and its SHA-256 checksum. Extract the ZIP and run `PixelForge.exe`. Once the pull requests are integrated and the owner authorizes publication, the versioned package can be attached to a permanent GitHub Release. **No v1.0.0 tag or public release has been published yet.**
 
 ## Quick Start
 
@@ -88,7 +88,7 @@ On a displayless Linux host:
 xvfb-run -a -s "-screen 0 1920x1080x24" cmake --build build --target visual_qa --parallel 2
 ```
 
-The target captures **192 real SDL/ImGui frames**: 12 scenes across 1280×720, 1366×768, 1662×896, and 1920×1080, at 100%, 125%, 150%, and 200% UI scale. It writes a contact sheet, HTML gallery, layout report, deterministic gameplay report, unit assertion report, comparison report, and timing data under `build/visual-qa/`. The current run performs **17,781 layout assertions**, **64 deterministic gameplay scenarios**, and **78 gameplay unit checks**. It checks initial map fit and centering, usable panel and canvas geometry, toolbar and status dimensions, clipping and intentional scrolling, and gameplay outcomes.
+The target captures **192 real SDL/ImGui frames**: 12 scenes across 1280×720, 1366×768, 1662×896, and 1920×1080, at 100%, 125%, 150%, and 200% UI scale. It writes a contact sheet, HTML gallery, layout report, deterministic gameplay report, unit assertion report, comparison report, and timing data under `build/visual-qa/`. The current run performs **17,877 layout assertions**, **64 deterministic gameplay scenarios**, and **78 gameplay unit checks**. It checks initial map fit and centering, usable panel and canvas geometry, toolbar and status dimensions, clipping and intentional scrolling, and gameplay outcomes.
 
 Screenshots come from the application renderer; they are not mockups. The Linux screenshot run can use a software or offscreen renderer and does not replace a Windows desktop acceptance pass. Visual baselines are deliberately absent until a maintainer reviews and approves candidates; comparison is reported as skipped and never accepts screenshots automatically.
 
@@ -108,6 +108,6 @@ GitHub Actions builds and tests Windows and Ubuntu, runs Visual QA on both platf
 
 ## Known limitations and release status
 
-PixelForge is a focused editor/playtest tool, not a full game engine. Runtime enemies do not have AI; triggers only display a message; character animation is a small procedural two-frame treatment; audio and scripting are absent. Native Windows dialogs, mouse-driven tile editing, and packaged interactive use still need the manual acceptance checklist in [release readiness](docs/release-readiness.md).
+PixelForge is a focused editor/playtest tool, not a full game engine. Runtime enemies do not have AI; triggers only display a message; character animation is a small procedural two-frame treatment; audio and scripting are absent. The maintainer completed the Windows RC2 manual acceptance checklist on October 14, 2026, including native dialogs, mouse and keyboard interaction, Play/Stop, and clean application exit. The final licensed build still needs its own passing CI and package-integrity checks before release.
 
-There is no project-wide license yet. The proposed MIT text and implications are documented in [the license review](docs/proposed-MIT-license.md); only maintainers can approve the project license. SDL3, Dear ImGui, nlohmann/json, stb, and the original CC0 atlas have their own notices in `THIRD_PARTY_NOTICES.md` and the package. PixelForge is not ready for public release until the project license and remaining acceptance gates are resolved.
+PixelForge is licensed under the [MIT License](LICENSE), Copyright (c) 2026 badmrfrosty313. SDL3, Dear ImGui, nlohmann/json, stb, and the original CC0 atlas retain their separate notices in `THIRD_PARTY_NOTICES.md` and the Windows package. The final release remains unpublished pending PR integration, fresh CI verification, and owner authorization.
