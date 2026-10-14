@@ -71,7 +71,20 @@ int main(int argc, char **argv) {
     invalid([](auto &j) { j["collision"][0] = 2; });
     invalid([](auto &j) { j["tile_size"]["width"] = 0; });
     invalid([](auto &j) { j["tileset"]["path"] = "../outside.png"; });
+    invalid([](auto &j) { j["tileset"]["path"] = "assets/../outside.png"; });
     invalid([](auto &j) { j["tileset"]["path"] = "/tmp/outside.png"; });
+    invalid([](auto &j) { j["tileset"]["path"] = "C:/outside.png"; });
+    invalid([](auto &j) { j["tileset"]["path"] = R"(C:\outside.png)"; });
+    invalid([](auto &j) {
+      j["tileset"]["path"] = "//server/share/outside.png";
+    });
+    invalid([](auto &j) {
+      j["tileset"]["path"] = R"(\\server\share\outside.png)";
+    });
+    auto relative_asset = base;
+    relative_asset["tileset"]["path"] = "assets/custom/atlas.png";
+    check(deserialize(relative_asset.dump()).tileset_path ==
+          "assets/custom/atlas.png");
     invalid([](auto &j) {
       j["entities"].push_back({{"id", 1},
                                {"type", "npc"},

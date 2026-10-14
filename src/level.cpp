@@ -105,7 +105,9 @@ void Level::validate() const {
     throw std::invalid_argument(
         "Tileset reference must be a safe relative path");
   const std::filesystem::path asset(tileset_path);
-  if (asset.is_absolute())
+  // is_absolute() is platform-specific: on Windows a POSIX-rooted path such
+  // as /tmp/atlas.png is rooted but not absolute. Reject every rooted form.
+  if (asset.has_root_path() || asset.is_absolute())
     throw std::invalid_argument("Tileset reference must be relative");
   for (const auto &part : asset)
     if (part == ".." || part == ".")
