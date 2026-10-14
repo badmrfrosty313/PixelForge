@@ -114,7 +114,10 @@ void Editor::apply_ui_scale(int percent) {
       std::begin(presets), std::end(presets), [percent](int a, int b) {
         return std::abs(a - percent) < std::abs(b - percent);
       });
+  const int previous_scale = ui_scale_percent_;
   ui_scale_percent_ = *selected;
+  if (previous_scale != ui_scale_percent_)
+    reset_layout_requested_ = true;
   const float scale = static_cast<float>(ui_scale_percent_) / 100.0f;
   ImGui::GetStyle() = base_style_;
   ImGui::GetStyle().ScaleAllSizes(scale);
@@ -221,16 +224,22 @@ void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
   ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
 
   ImGuiID center = dockspace_id, left = 0, right = 0, bottom = 0, top = 0;
-  const float side_width = viewport->WorkSize.x < 1200.0f ? 0.24f : 0.21f;
+  const bool large_ui = ui_scale_percent_ >= 150;
+  const bool compact_viewport = viewport->WorkSize.x < 1400.0f;
+  const float side_width = large_ui
+                               ? (compact_viewport ? 0.30f : 0.25f)
+                               : (compact_viewport ? 0.24f : 0.21f);
+  const float right_width = large_ui
+                                ? (compact_viewport ? 0.32f : 0.29f)
+                                : 0.25f;
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,
+                              large_ui ? 0.32f : 0.15f, &top, &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,
+                              large_ui ? 0.35f : 0.20f, &bottom, &center);
   ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, side_width, &left,
                               &center);
-  ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.25f, &right, &center);
-  ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,
-                              ui_scale_percent_ >= 150 ? 0.23f : 0.10f,
-                              &bottom, &center);
-  ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,
-                              ui_scale_percent_ >= 150 ? 0.25f : 0.12f,
-                              &top, &center);
+  ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, right_width, &right,
+                              &center);
   ImGuiID layers = 0, entities = 0;
   ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.48f, &entities,
                               &layers);
@@ -601,7 +610,8 @@ void Editor::toolbar() {
         document_.redo();
       ImGui::EndDisabled();
       record_visual_control("Redo");
-      ImGui::SameLine();
+      if (ui_scale_percent_ < 200)
+        ImGui::SameLine();
       ImGui::TextUnformatted("Tool");
       ImGui::SameLine();
       ImGui::SetNextItemWidth(ImGui::GetWindowWidth() < 1100.0f ? 118.0f
@@ -735,7 +745,11 @@ void Editor::toolbar() {
 }
 void Editor::layers_panel() {
   ImGui::Begin("Layers");
-  if (ImGui::Button("+ Layer")) {
+  ImGui::TextUnformatted("Layer name");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputText("##new-layer-name", layer_name_, sizeof(layer_name_));
+  record_visual_control("Layer name field");
+  if (ImGui::Button("+ Layer", ImVec2(-1, 0))) {
     try {
       document_.create_layer(layer_name_);
       set_active_layer(static_cast<int>(document_.level().layers.size()) - 1);
@@ -745,9 +759,6 @@ void Editor::layers_panel() {
     }
   }
   record_visual_control("Add layer");
-  ImGui::SameLine();
-  ImGui::InputText("##new-layer-name", layer_name_, sizeof(layer_name_));
-  record_visual_control("Layer name field");
   for (int i = static_cast<int>(document_.level().layers.size()) - 1; i >= 0;
        --i) {
     const auto &layer = document_.level().layers[static_cast<std::size_t>(i)];
@@ -755,10 +766,9 @@ void Editor::layers_panel() {
     ImGui::PushID(i);
     if (ImGui::Selectable(layer.name.c_str(), active_layer_ == i,
                           ImGuiSelectableFlags_AllowDoubleClick,
-                          ImVec2(112, 0)))
+                          ImVec2(0, 0)))
       set_active_layer(i);
     record_visual_control("Layer selector");
-    ImGui::SameLine();
     bool visible = layer.visible;
     if (ImGui::Checkbox("V##visible", &visible)) {
       try {
@@ -781,21 +791,19 @@ void Editor::layers_panel() {
     }
     record_visual_control("Layer lock");
     if (active_layer_ == i) {
-      if (ImGui::SmallButton("Move up") &&
+      if (ImGui::SmallButton("Up") &&
           i + 1 < static_cast<int>(document_.level().layers.size())) {
         document_.move_layer(i, i + 1);
         set_active_layer(i + 1);
         mark_dirty_status();
       }
       record_visual_control("Move layer up");
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Move down") && i > 0) {
+      if (ImGui::SmallButton("Down") && i > 0) {
         document_.move_layer(i, i - 1);
         set_active_layer(i - 1);
         mark_dirty_status();
       }
       record_visual_control("Move layer down");
-      ImGui::SameLine();
       if (ImGui::SmallButton("Rename"))
         ImGui::OpenPopup("Rename layer");
       record_visual_control("Rename layer");
@@ -815,7 +823,6 @@ void Editor::layers_panel() {
         }
         ImGui::EndPopup();
       }
-      ImGui::SameLine();
       if (ImGui::SmallButton("Delete")) {
         try {
           document_.delete_layer(i);
@@ -871,7 +878,9 @@ void Editor::entity_inspector() {
   ImGui::Begin("Entities");
   const char *types =
       "Player spawn\0NPC\0Enemy\0Collectible\0Trigger\0Checkpoint\0Hazard\0";
-  ImGui::Combo("Place type", &entity_type_index_, types);
+  ImGui::TextUnformatted("Place type");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::Combo("##entity-place-type", &entity_type_index_, types);
   record_visual_control("Entity type selector");
   const auto &entities = document_.level().entities;
   auto found =
@@ -891,12 +900,16 @@ void Editor::entity_inspector() {
   record_visual_control("Entity X field");
   ImGui::InputFloat("Y", &entity_y_, 0.25f, 1.0f, "%.2f");
   record_visual_control("Entity Y field");
-  ImGui::InputText("Name", entity_name_, sizeof(entity_name_));
+  ImGui::TextUnformatted("Entity name");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputText("##entity-name", entity_name_, sizeof(entity_name_));
   record_visual_control("Entity name field");
-  ImGui::InputTextMultiline("Message", entity_message_, sizeof(entity_message_),
-                            ImVec2(0, 70));
+  ImGui::TextUnformatted("Message");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputTextMultiline("##entity-message", entity_message_, sizeof(entity_message_),
+                            ImVec2(0, 70.0f * ui_scale_percent_ / 100.0f));
   record_visual_control("Entity message field");
-  if (ImGui::Button("Apply properties")) {
+  if (ImGui::Button("Apply properties", ImVec2(-1, 0))) {
     Entity changed = *found;
     changed.x = entity_x_;
     changed.y = entity_y_;
@@ -916,8 +929,7 @@ void Editor::entity_inspector() {
     }
   }
   record_visual_control("Apply entity properties");
-  ImGui::SameLine();
-  if (ImGui::Button("Delete entity")) {
+  if (ImGui::Button("Delete entity", ImVec2(-1, 0))) {
     try {
       document_.delete_entity(selected_entity_id_);
       selected_entity_id_ = 0;
@@ -1172,7 +1184,7 @@ void Editor::canvas() {
                                           document_.level().tile_width),
                                 size.y / (document_.level().height *
                                           document_.level().tile_height)),
-                       0.2f, 6.0f);
+                       0.05f, 6.0f);
     cell_x = document_.level().tile_width * zoom_;
     cell_y = document_.level().tile_height * zoom_;
     pan_x_ = (size.x - document_.level().width * cell_x) * 0.5f;
@@ -1426,13 +1438,13 @@ void Editor::draw() {
                                         std::max(320.0f, work_size.x - 24.0f));
     const float welcome_height = std::min(400.0f * ui_scale,
                                          std::max(280.0f, work_size.y - 24.0f));
-    const float button_width = std::min(245.0f * ui_scale,
-                                        welcome_width - 40.0f);
-    const bool side_by_side = work_size.x >= button_width * 2.0f + 48.0f;
     ImGui::SetNextWindowSize(ImVec2(welcome_width, welcome_height),
                              ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Welcome to PixelForge", &show_welcome_)) {
-        ImGui::TextWrapped("Build and playtest top-down RPGs and platformers in one workspace.");
+      const float panel_width = ImGui::GetContentRegionAvail().x;
+      const float button_width = std::min(245.0f * ui_scale, panel_width);
+      const bool side_by_side = panel_width >= button_width * 2.0f + 48.0f;
+      ImGui::TextWrapped("Build and playtest top-down RPGs and platformers in one workspace.");
       ImGui::Spacing();
       if (ImGui::Button("New RPG level", ImVec2(button_width, 42.0f * ui_scale))) {
         genre_ = 0;
@@ -1489,17 +1501,23 @@ void Editor::draw() {
     ImGui::End();
   }
   ImGui::Begin("Tileset Palette");
-  ImGui::Combo("New genre", &genre_, "Top-down RPG\0Platformer\0");
+  auto palette_input = [this](const char *label, int *value) {
+    ImGui::TextUnformatted(label);
+    ImGui::PushID(label);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputInt("##value", value);
+    record_visual_control(label);
+    ImGui::PopID();
+  };
+  ImGui::TextUnformatted("New genre");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::Combo("##new-genre", &genre_, "Top-down RPG\0Platformer\0");
   record_visual_control("New genre");
-  ImGui::InputInt("New width", &width_);
-  record_visual_control("New width");
-  ImGui::InputInt("New height", &height_);
-  record_visual_control("New height");
-  ImGui::InputInt("Cell width", &level_tile_width_);
-  record_visual_control("Cell width");
-  ImGui::InputInt("Cell height", &level_tile_height_);
-  record_visual_control("Cell height");
-  if (ImGui::Button("New level")) {
+  palette_input("New width", &width_);
+  palette_input("New height", &height_);
+  palette_input("Cell width", &level_tile_width_);
+  palette_input("Cell height", &level_tile_height_);
+  if (ImGui::Button("New level", ImVec2(-1, 0))) {
     if (document_.dirty())
       confirm_new_ = true;
     else
@@ -1507,15 +1525,13 @@ void Editor::draw() {
   }
   record_visual_control("New level");
   ImGui::Separator();
-  ImGui::InputInt("Tile width", &tile_width_);
-  record_visual_control("Tile width");
-  ImGui::InputInt("Tile height", &tile_height_);
-  record_visual_control("Tile height");
-  if (ImGui::Button("Import PNG..."))
+  palette_input("Tile width", &tile_width_);
+  palette_input("Tile height", &tile_height_);
+  if (ImGui::Button("Import PNG...", ImVec2(-1, 0)))
     request_tileset_dialog();
   record_visual_control("Import tileset");
   ImGui::TextWrapped("Atlas: %s", tileset_path_);
-  if (ImGui::Button("Load current atlas settings")) {
+  if (ImGui::Button("Apply tileset", ImVec2(-1, 0))) {
     try {
       Level settings = document_.level();
       settings.tile_width = level_tile_width_;
@@ -1537,19 +1553,23 @@ void Editor::draw() {
   ImGui::Text("%s", tileset_.loaded() ? "PNG atlas ready" : "No atlas loaded");
   if (tileset_.loaded()) {
     const int count = std::min(tileset_.tile_count(), 255);
-    const int per_row = std::max(
-        1, static_cast<int>((ImGui::GetContentRegionAvail().x) / 42.0f));
+    const float tile_button_size = 38.0f * ui_scale_percent_ / 100.0f;
+    const float tile_step = tile_button_size + ImGui::GetStyle().ItemSpacing.x;
     ImGui::BeginChild("atlas tiles", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    const int per_row = std::max(
+        1, static_cast<int>(ImGui::GetContentRegionAvail().x / tile_step));
     auto *list = ImGui::GetWindowDrawList();
     for (int i = 1; i <= count; ++i) {
       ImGui::PushID(i);
       ImVec2 at = ImGui::GetCursorScreenPos();
-      ImGui::InvisibleButton("tile", ImVec2(38, 38));
+      ImGui::InvisibleButton("tile", ImVec2(tile_button_size, tile_button_size));
       if (ImGui::IsItemClicked())
         selected_tile_ = i;
       if (i <= per_row)
         record_visual_control("Tile palette item");
-      ImVec2 a(at.x + 3, at.y + 3), b(at.x + 35, at.y + 35);
+      const float inset = 3.0f * ui_scale_percent_ / 100.0f;
+      ImVec2 a(at.x + inset, at.y + inset),
+          b(at.x + tile_button_size - inset, at.y + tile_button_size - inset);
       if (i == selected_tile_)
         list->AddRect(a, b, IM_COL32(255, 220, 96, 255), 0, 0, 2);
       draw_tile(list, tileset_, i, a, b);
@@ -1588,7 +1608,7 @@ void Editor::draw() {
                      document_.dirty() ? " *" : "",
                      genre_name(document_.level().genre).c_str(),
                      document_.level().width, document_.level().height);
-  ImGui::Text("Layer: %s  |  %s  |  Tool: %s  |  Zoom: %.0f%%  |  Status: %s",
+  ImGui::TextWrapped("%s  |  %s  |  %s  |  %.0f%%  |  %s",
               document_.level().layers[static_cast<std::size_t>(active_layer_)]
                   .name.c_str(),
               cursor, tool_name(tool_), zoom_ * 100.0f, status_.c_str());
