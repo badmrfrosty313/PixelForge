@@ -39,6 +39,13 @@ int main(int argc, char **argv) {
     move_right.right = true;
     for (int i = 0; i < 100; ++i)
       topdown.step(move_right);
+    check(topdown.player().moving && topdown.player().facing_x == 1,
+          "top-down movement updates the character facing state");
+    Input move_up;
+    move_up.up = move_up.right = true;
+    topdown.step(move_up);
+    check(topdown.player().facing_y == -1,
+          "top-down movement records the character vertical facing");
     check(topdown.player().x < 3.8f, "top-down collision blocks solid tile");
     close(topdown.player().x, 4.0f - player_hitbox_width * 0.5f, 0.001f,
           "top-down wall contact resolves to the exact hitbox face");

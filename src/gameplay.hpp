@@ -19,6 +19,8 @@ struct Player {
   // x/y are the hitbox center in tile units; velocity is tile units/second.
   float x = 0, y = 0, velocity_x = 0, velocity_y = 0;
   bool grounded = false;
+  bool moving = false;
+  int facing_x = 0, facing_y = 1;
   int contact_normal_x = 0, contact_normal_y = 0;
   int contact_tile_x = -1, contact_tile_y = -1;
   int support_tile_x = -1, support_tile_y = -1;

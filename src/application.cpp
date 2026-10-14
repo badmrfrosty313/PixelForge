@@ -104,6 +104,10 @@ int run(bool smoke) {
   constexpr int smoke_heights[] = {900, 720, 768, 560};
   constexpr float smoke_scales[] = {1.0f, 1.25f, 1.5f, 2.0f};
   while (running) {
+    if (smoke && frames == 1)
+      editor.start_smoke_playtest(Genre::top_down_rpg);
+    if (smoke && frames == 3)
+      editor.start_smoke_playtest(Genre::platformer);
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       ImGui_ImplSDL3_ProcessEvent(&event);

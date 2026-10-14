@@ -53,13 +53,13 @@ Click **Play** to run an isolated copy of the current level. Click the canvas to
 
 Version 2 saves include genre, map and tile dimensions, a safe relative tileset reference and atlas cell size, ordered visual layers with visibility/lock state, row-major tile data, an explicit boolean collision grid, and typed entities with stable IDs and JSON properties. Version 1 files remain readable; missing layer state defaults to visible and unlocked, tile size defaults to 24x24, and the bundled atlas is selected. Unknown fields and unsupported versions are rejected instead of discarded. Paths must be relative and cannot traverse upward. Inputs and serialized documents are capped at 16 MiB.
 
-Model tests cover geometry and collision bounds, v1 migration, v2 round-trips for both genres, unsafe references, malformed/unknown data, duplicate entity IDs, and bundled examples. Document tests cover grouped tile and collision strokes, undo/redo, layer operations, entity CRUD, invalid coordinates, asset settings, and dirty state. The editor smoke test loads the bundled PNG through stb_image and SDL, then renders using the dummy video driver.
+Model tests cover geometry and collision bounds, v1 migration, v2 round-trips for both genres, unsafe references, malformed/unknown data, duplicate entity IDs, and bundled examples. Document tests cover grouped tile and collision strokes, undo/redo, layer operations, entity CRUD, invalid coordinates, asset settings, and dirty state. The editor smoke test draws the Welcome screen, loads both example documents through the executable resource root, starts each playtest, and renders the original tileset and runtime sprite/entity shapes through SDL and Dear ImGui on the dummy video driver.
 
 ## Validation and limitations
 
-Use CTest as above. The automated test programs currently report 80 model/serialization checks, 62 document/undo checks, and 72 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify native open/save/import dialogs, entity/collision editing, and both example playtests; the headless smoke test cannot prove Windows dialog behavior or interactive visual quality.
+Use CTest as above. The automated test programs currently report 80 model/serialization checks, 62 document/undo checks, and 74 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify native open/save/import dialogs, entity/collision editing, and both example playtests; the headless smoke test cannot prove Windows dialog behavior or interactive visual quality.
 
-Genuine application screenshots are not included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
+Genuine application screenshots are not included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, character animation is a small procedural two-frame treatment, and audio is absent. Interactive desktop behavior and Windows runtime still require manual verification.
 
 ## Studio Alpha Phase 1
 
@@ -119,3 +119,7 @@ File → Open/Save As and PNG import use SDL3 native dialogs. Bundled resources 
 ## Studio Beta Phase 4
 
 First launch opens a dismissible welcome workspace with genre-specific New actions, Open, one-click RPG and platformer demos, and concise controls/objectives. Example loading continues through the same dirty-document guard and serialization path as normal Open. The RPG objective is to talk with Mira and find the Moon crystal; the platformer objective is to cross the hazard gap, reach the checkpoint, and touch Finish. The packaged example levels are included in the Windows artifact.
+
+## Studio Beta Phase 5
+
+Playtest characters are now drawn as an original pixel-style explorer fitted to the shared collision bounds, with direction, a simple walking cycle, and distinct jump/fall leg poses. Runtime NPCs, enemies, collectibles, hazards, checkpoints, spawn markers, and triggers have genre-neutral visual symbols. In RPG playtest, approaching an NPC shows an E-to-talk prompt. The visual primitives are authored in the renderer and add no third-party art assets. See [Phase 5 presentation notes](docs/studio-beta-phase5-presentation.md).

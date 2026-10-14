@@ -133,6 +133,18 @@ void Editor::set_display_scale(float scale) {
       std::clamp(scale, 1.0f, 2.0f) * 100.0f));
   apply_ui_scale(target);
 }
+void Editor::start_smoke_playtest(Genre genre) {
+  const auto filename = genre == Genre::top_down_rpg ? "rpg.json"
+                                                       : "platformer.json";
+  const auto sample = std::filesystem::absolute(resource_root_ / "examples" /
+                                                 filename)
+                          .lexically_normal();
+  open_path(sample);
+  if (document_path_ != sample)
+    throw std::runtime_error("Cannot load the packaged playtest example");
+  playtest_ = std::make_unique<gameplay::Session>(document_.level());
+  last_playtest_frame_ = std::chrono::steady_clock::now();
+}
 void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
   const ImGuiDockNode *existing = ImGui::DockBuilderGetNode(dockspace_id);
   if (!force && existing &&
@@ -1193,27 +1205,31 @@ void Editor::playtest_canvas() {
   }
   for (const auto &entity : world.entities) {
     if (entity.type == EntityType::player_spawn ||
+        entity.type == EntityType::enemy ||
         entity.type == EntityType::collectible ||
         entity.type == EntityType::npc || entity.type == EntityType::hazard ||
         entity.type == EntityType::checkpoint ||
         entity.type == EntityType::trigger) {
       const auto projected = camera.project(entity.x, entity.y);
-      const ImVec2 center(projected.x, projected.y);
-      const ImU32 color =
-          entity.type == EntityType::npc           ? IM_COL32(80, 170, 255, 255)
-          : entity.type == EntityType::collectible ? IM_COL32(255, 215, 80, 255)
-          : entity.type == EntityType::hazard      ? IM_COL32(255, 75, 65, 255)
-                                              : IM_COL32(190, 125, 240, 255);
-      draw->AddCircleFilled(center, std::max(5.0f, cell * 0.22f), color);
+      draw_runtime_entity(draw, entity.type, ImVec2(projected.x, projected.y),
+                          cell);
     }
   }
   const auto player_bounds = gameplay::bounds(player);
   const auto player_rect = camera.project(
       player_bounds.left, player_bounds.top, player_bounds.right,
       player_bounds.bottom);
-  draw->AddRectFilled(ImVec2(player_rect.left, player_rect.top),
+  const double animation_rate = player.moving ? 8.0 : 2.0;
+  const int animation_frame =
+      static_cast<int>(ImGui::GetTime() * animation_rate) & 1;
+  const bool jumping = level.genre == Genre::platformer && !player.grounded &&
+                       player.velocity_y < 0.0f;
+  const bool falling = level.genre == Genre::platformer && !player.grounded &&
+                       player.velocity_y >= 0.0f;
+  draw_runtime_player(draw, ImVec2(player_rect.left, player_rect.top),
                       ImVec2(player_rect.right, player_rect.bottom),
-                      IM_COL32(80, 235, 145, 255), 3.0f);
+                      player.facing_x, player.facing_y, player.moving, jumping,
+                      falling, animation_frame);
   if (debug_overlay_) {
     draw->AddRect(ImVec2(player_rect.left, player_rect.top),
                   ImVec2(player_rect.right, player_rect.bottom),
@@ -1257,6 +1273,29 @@ void Editor::playtest_canvas() {
   if (!playtest_->message().empty())
     draw->AddText(ImVec2(pos.x + 10, pos.y + 32), IM_COL32(255, 230, 125, 255),
                   playtest_->message().c_str());
+  if (level.genre == Genre::top_down_rpg && !debug_overlay_) {
+    const Entity *nearby_npc = nullptr;
+    float nearest_squared = 0.85f * 0.85f;
+    for (const auto &entity : world.entities) {
+      if (entity.type != EntityType::npc)
+        continue;
+      const float dx = player.x - entity.x;
+      const float dy = player.y - entity.y;
+      const float distance_squared = dx * dx + dy * dy;
+      if (distance_squared <= nearest_squared) {
+        nearest_squared = distance_squared;
+        nearby_npc = &entity;
+      }
+    }
+    if (nearby_npc) {
+      std::string prompt = "Press E to talk";
+      const auto name = nearby_npc->properties.find("name");
+      if (name != nearby_npc->properties.end() && name->second.is_string())
+        prompt += " to " + name->second.get<std::string>();
+      draw->AddText(ImVec2(pos.x + 10, pos.y + 54),
+                    IM_COL32(173, 222, 245, 255), prompt.c_str());
+    }
+  }
   draw->PopClipRect();
   ImGui::End();
 }

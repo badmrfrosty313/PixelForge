@@ -88,6 +88,7 @@ void respawn(World &world, Player &player) {
   player.y = world.checkpoint_y;
   player.velocity_x = player.velocity_y = 0;
   player.grounded = false;
+  player.moving = false;
   player.contact_normal_x = player.contact_normal_y = 0;
   player.contact_tile_x = player.contact_tile_y = -1;
   player.support_tile_x = player.support_tile_y = -1;
@@ -160,7 +161,18 @@ void TopDownController::step(World &world, Player &player, const Input &input,
   float dx = static_cast<float>(input.right) - static_cast<float>(input.left);
   float dy = static_cast<float>(input.down) - static_cast<float>(input.up);
   const float length = std::sqrt(dx * dx + dy * dy);
+  player.moving = length > 0.0f;
   if (length > 0) {
+    if (dx != 0.0f) {
+      player.facing_x = dx > 0.0f ? 1 : -1;
+      if (dy == 0.0f)
+        player.facing_y = 0;
+    }
+    if (dy != 0.0f) {
+      player.facing_y = dy > 0.0f ? 1 : -1;
+      if (dx == 0.0f)
+        player.facing_x = 0;
+    }
     dx /= length;
     dy /= length;
   }
@@ -192,6 +204,11 @@ void PlatformerController::step(World &world, Player &player,
   player.velocity_x =
       (static_cast<float>(input.right) - static_cast<float>(input.left)) *
       platform_speed;
+  player.moving = player.velocity_x != 0.0f;
+  if (player.moving) {
+    player.facing_x = player.velocity_x > 0.0f ? 1 : -1;
+    player.facing_y = 0;
+  }
   if (input.jump && player.grounded) {
     player.velocity_y = -jump_speed;
     player.grounded = false;
