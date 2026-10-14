@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-project(PixelForge VERSION 0.1.0 LANGUAGES CXX)
+project(PixelForge VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
@@ -77,6 +77,9 @@ if(PIXELFORGE_EDITOR)
  install(DIRECTORY assets/ DESTINATION assets)
  install(DIRECTORY examples/ DESTINATION examples)
  install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
+ install(FILES docs/release-readiness.md docs/proposed-MIT-license.md
+               docs/release-notes-v1.0.0-rc1.md DESTINATION docs)
+ install(DIRECTORY docs/screenshots/ DESTINATION docs/screenshots)
  install(FILES "${SDL3_SOURCE_DIR}/LICENSE.txt"
          DESTINATION licenses RENAME SDL3-LICENSE.txt)
  install(FILES "${imgui_SOURCE_DIR}/LICENSE.txt"

@@ -1,13 +1,23 @@
 # PixelForge — portfolio summary
 
-PixelForge is a native C++20 desktop editor for building and playtesting 2D top-down RPG and platformer levels. A shared SDL3 and Dear ImGui workspace edits both genres through one validated level model, layered tile canvas, collision and entity tools, and versioned JSON persistence.
+PixelForge is a native C++20 desktop editor for building and playtesting 2D top-down RPG and platformer levels. Both genres share one SDL3 and Dear ImGui workspace, one renderer-independent level/document model, and versioned JSON persistence.
 
-The project demonstrates renderer-independent gameplay rules, fixed-step simulation, deterministic collision tests, bounded undo/redo, atomic document saves, document-relative asset packaging, and cross-platform Windows/Linux CI. A recent Windows-specific path-validation issue was fixed by rejecting every rooted path rather than relying on host-specific `filesystem::path::is_absolute()` behavior. The playtest also includes collision overlays that expose the hitbox, supporting tile, contact normals, and camera transform.
+## Engineering work
 
-## Resume-ready description
+- Built a dockable editor with tile painting, erase/line/rectangle/flood-fill/eyedropper tools, layers, collision grids, entities, and bounded undo/redo.
+- Kept gameplay rules separate from editor and level data; implemented fixed-step RPG and platformer sessions using shared collision code.
+- Added strict JSON schema validation and migrations, safe relative-asset resolution, and atomic saves.
+- Fixed Windows path validation by rejecting any rooted path independently of host-specific `filesystem::path::is_absolute()` behavior.
+- Fixed platformer rendered-player and collision-box alignment, exact tile contact, and below-map respawn behavior; added collision diagnostics.
+- Added a native visual QA lab that captures the real application and validates layout and deterministic gameplay on Windows and Linux.
+- Packaged the application and example levels for Windows with third-party notices and a working-directory-independent resource lookup.
 
-Built PixelForge, a C++20/SDL3 2D level editor with a shared RPG/platformer workflow, Dear ImGui tooling, JSON serialization, deterministic collision and playtesting, native file dialogs, and Windows/Ubuntu CI. Added regression tests for physics, serialization, unsafe paths, asset resolution, and document history; packaged a portable Windows ZIP with runtime assets and dependency notices.
+## Testing evidence
 
-## Evidence and current limits
+Current local run: CTest passed 4/4 targets, comprising 81 level/serialization checks, 62 document checks, 78 gameplay checks, and the SDL/ImGui editor smoke. The core suites also passed ASan and UBSan with leak detection enabled (3/3 CTest targets).
 
-The repository contains deterministic model, document, and gameplay suites, a headless SDL/ImGui smoke that loads both demos and exercises repeated playtest sessions, and Windows packaging validation. This environment cannot capture a genuine interactive Windows screenshot. The engine has no audio, enemy AI, scripting, or full animation system. The CC0 atlas and third-party dependency notices are present, but the repository does not declare a project-wide license; maintainers should choose one before public release.
+The Visual QA matrix captured 192 real SDL/ImGui frames at four resolutions and four UI scales. Its layout report recorded 17,781 assertions, and deterministic scenarios passed 64 gameplay checks. The screenshot comparison step reports skipped until human-approved baselines are added; no baselines are accepted automatically. Consult [release readiness](release-readiness.md) and the linked hosted workflow for evidence from the exact release-candidate source revision; earlier Beta runs do not verify later commits.
+
+## Current limitations
+
+PixelForge is an editor and minimal playtest environment, not a full game engine. It has no audio, scripting, enemy AI, or full animation system. Native Windows dialogs and interactive editing still require a maintainer's Windows acceptance pass. The project-wide license is pending approval; the prepared MIT proposal is not an active license.
