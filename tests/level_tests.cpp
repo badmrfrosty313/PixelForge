@@ -1,5 +1,6 @@
 #include "serialization.hpp"
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -38,6 +39,10 @@ int main(int argc, char **argv) {
                   ("pixelforge-test-" + genre_name(genre) + ".json");
       save(l, path);
       check(load(path) == l);
+      auto replacement = l;
+      replacement.paint(0, 0, 0, 19);
+      save(replacement, path);
+      check(load(path) == replacement);
       std::filesystem::remove(path);
       rejects([&] { l.paint(0, -1, 0, 1); });
       rejects([&] { l.paint(0, 4, 0, 1); });
@@ -138,6 +143,32 @@ int main(int argc, char **argv) {
     check(deserialize(serialize(world)) == world);
     rejects([&] { world.set_solid(3, 0, true); });
     rejects([] { load("missing-pixelforge-level.json"); });
+    const auto failure_target =
+        std::filesystem::temp_directory_path() / "pixelforge-save-failure";
+    std::filesystem::remove_all(failure_target);
+    std::filesystem::create_directory(failure_target);
+    const auto marker = failure_target / "preserved.txt";
+    {
+      std::ofstream file(marker);
+      file << "keep";
+    }
+    rejects([&] { save(Level(Genre::platformer, 2, 2), failure_target); });
+    check(std::filesystem::is_directory(failure_target) &&
+          std::filesystem::exists(marker));
+    {
+      std::ifstream file(marker);
+      std::string contents;
+      file >> contents;
+      check(contents == "keep");
+    }
+    const auto temp_prefix = failure_target.filename().string() + ".tmp-";
+    bool temporary_leaked = false;
+    for (const auto &entry : std::filesystem::directory_iterator(
+             failure_target.parent_path()))
+      temporary_leaked = temporary_leaked ||
+                         entry.path().filename().string().find(temp_prefix) == 0;
+    check(!temporary_leaked);
+    std::filesystem::remove_all(failure_target);
     rejects([] {
       Level l;
       l.layers[0].tiles.clear();

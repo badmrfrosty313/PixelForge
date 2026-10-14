@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <imgui.h>
+#include <stdexcept>
 #include <utility>
 namespace pf {
 namespace {
@@ -61,19 +62,44 @@ void Editor::mark_dirty_status() {
   if (document_.dirty())
     status_ = "Modified";
 }
-void Editor::save_level() {
+bool Editor::save_level() {
   try {
     const auto target =
         document_path_.empty() ? std::filesystem::path(path_) : document_path_;
+    if (target.empty())
+      throw std::invalid_argument("Level path cannot be empty");
     save(document_.level(), target);
     document_path_ = target;
     const auto text = target.string();
     std::snprintf(path_, sizeof(path_), "%s", text.c_str());
     document_.mark_saved();
     status_ = "Saved";
+    return true;
   } catch (const std::exception &e) {
     status_ = e.what();
+    return false;
   }
+}
+bool Editor::save_level_as() {
+  try {
+    const std::filesystem::path target(path_);
+    if (target.empty())
+      throw std::invalid_argument("Level path cannot be empty");
+    save(document_.level(), target);
+    document_path_ = target;
+    document_.mark_saved();
+    status_ = "Saved as " + target.string();
+    return true;
+  } catch (const std::exception &e) {
+    status_ = e.what();
+    return false;
+  }
+}
+void Editor::request_close() {
+  if (document_.dirty())
+    confirm_close_ = true;
+  else
+    close_requested_ = true;
 }
 void Editor::open_path() {
   try {
@@ -170,12 +196,11 @@ void Editor::toolbar() {
       }
       if (ImGui::MenuItem("Save", "Ctrl+S"))
         save_level();
+      if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S"))
+        save_level_as();
       ImGui::Separator();
-      if (ImGui::MenuItem("Exit")) {
-        SDL_Event event{};
-        event.type = SDL_EVENT_QUIT;
-        SDL_PushEvent(&event);
-      }
+      if (ImGui::MenuItem("Exit"))
+        request_close();
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
@@ -215,66 +240,66 @@ void Editor::toolbar() {
         playtest_.reset();
       ImGui::SameLine();
       ImGui::Text("%s", genre_name(document_.level().genre).c_str());
-      ImGui::End();
-      return;
-    }
-    if (ImGui::Button("Play")) {
-      try {
-        if (stroke_active_) {
-          document_.end_stroke();
-          stroke_active_ = false;
+    } else {
+      if (ImGui::Button("Play")) {
+        try {
+          if (stroke_active_) {
+            document_.end_stroke();
+            stroke_active_ = false;
+          }
+          if (collision_stroke_active_) {
+            document_.end_collision_stroke();
+            collision_stroke_active_ = false;
+          }
+          playtest_ = std::make_unique<gameplay::Session>(document_.level());
+          last_playtest_frame_ = std::chrono::steady_clock::now();
+        } catch (const std::exception &error) {
+          status_ = error.what();
         }
-        if (collision_stroke_active_) {
-          document_.end_collision_stroke();
-          collision_stroke_active_ = false;
-        }
-        playtest_ = std::make_unique<gameplay::Session>(document_.level());
-        last_playtest_frame_ = std::chrono::steady_clock::now();
-      } catch (const std::exception &error) {
-        status_ = error.what();
       }
+      ImGui::SameLine();
+      if (ImGui::Button("Undo"))
+        document_.undo();
+      ImGui::SameLine();
+      if (ImGui::Button("Redo"))
+        document_.redo();
+      ImGui::SameLine();
+      for (auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle, Tool::line,
+                        Tool::fill, Tool::eyedropper, Tool::collision,
+                        Tool::entity}) {
+        if (tool != Tool::pencil)
+          ImGui::SameLine();
+        if (tool_ == tool)
+          ImGui::PushStyleColor(
+              ImGuiCol_Button,
+              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::Button(tool_name(tool)))
+          tool_ = tool;
+        if (tool_ == tool)
+          ImGui::PopStyleColor();
+      }
+      ImGui::SameLine();
+      ImGui::Checkbox("Grid", &grid_visible_);
+      ImGui::SameLine();
+      if (ImGui::Button("Fit"))
+        fit_requested_ = true;
+      ImGui::SameLine();
+      if (ImGui::Button("100%")) {
+        zoom_ = 1;
+        pan_x_ = 20;
+        pan_y_ = 20;
+      }
+      ImGui::SameLine();
+      ImGui::Text("%s%s | %dx%d | %.0f%%",
+                  document_path_.empty()
+                      ? "Untitled"
+                      : document_path_.filename().string().c_str(),
+                  document_.dirty() ? " *" : "", document_.level().width,
+                  document_.level().height, zoom_ * 100.0f);
+      ImGui::SameLine();
+      ImGui::Checkbox("Collision", &collision_visible_);
     }
-    ImGui::SameLine();
-    if (ImGui::Button(document_.can_undo() ? "Undo" : "Undo"))
-      document_.undo();
-    ImGui::SameLine();
-    if (ImGui::Button("Redo"))
-      document_.redo();
-    ImGui::SameLine();
-    for (auto tool :
-         {Tool::pencil, Tool::eraser, Tool::rectangle, Tool::line, Tool::fill,
-          Tool::eyedropper, Tool::collision, Tool::entity}) {
-      if (tool != Tool::pencil)
-        ImGui::SameLine();
-      if (tool_ == tool)
-        ImGui::PushStyleColor(ImGuiCol_Button,
-                              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-      if (ImGui::Button(tool_name(tool)))
-        tool_ = tool;
-      if (tool_ == tool)
-        ImGui::PopStyleColor();
-    }
-    ImGui::SameLine();
-    ImGui::Checkbox("Grid", &grid_visible_);
-    ImGui::SameLine();
-    if (ImGui::Button("Fit"))
-      fit_requested_ = true;
-    ImGui::SameLine();
-    if (ImGui::Button("100%")) {
-      zoom_ = 1;
-      pan_x_ = 20;
-      pan_y_ = 20;
-    }
-    ImGui::SameLine();
-    ImGui::Text("%s%s | %dx%d | %.0f%%",
-                document_path_.empty()
-                    ? "Untitled"
-                    : document_path_.filename().string().c_str(),
-                document_.dirty() ? " *" : "", document_.level().width,
-                document_.level().height, zoom_ * 100.0f);
   }
-  ImGui::SameLine();
-  ImGui::Checkbox("Collision", &collision_visible_);
   ImGui::End();
   if (confirm_new_) {
     ImGui::OpenPopup("Discard edits before New?");
@@ -283,6 +308,13 @@ void Editor::toolbar() {
   if (ImGui::BeginPopupModal("Discard edits before New?", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("The current document has unsaved changes.");
+    if (ImGui::Button("Save and create")) {
+      if (save_level()) {
+        new_level();
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Discard and create")) {
       new_level();
       ImGui::CloseCurrentPopup();
@@ -306,6 +338,33 @@ void Editor::toolbar() {
     ImGui::SameLine();
     if (ImGui::Button("Cancel"))
       ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+  if (confirm_close_) {
+    ImGui::OpenPopup("Save changes before exit?");
+    confirm_close_ = false;
+  }
+  if (ImGui::BeginPopupModal("Save changes before exit?", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("The current document has unsaved changes.");
+    if (ImGui::Button("Save and exit")) {
+      if (save_level()) {
+        close_requested_ = true;
+        confirm_close_ = false;
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard and exit")) {
+      close_requested_ = true;
+      confirm_close_ = false;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      confirm_close_ = false;
+      ImGui::CloseCurrentPopup();
+    }
     ImGui::EndPopup();
   }
 }
@@ -532,8 +591,12 @@ void Editor::canvas() {
     }
     document_.redo();
   }
-  if (focused && ImGui::IsKeyPressed(ImGuiKey_S) && io.KeyCtrl)
-    save_level();
+  if (focused && ImGui::IsKeyPressed(ImGuiKey_S) && io.KeyCtrl) {
+    if (io.KeyShift)
+      save_level_as();
+    else
+      save_level();
+  }
   if (focused && ImGui::IsKeyPressed(ImGuiKey_N) && io.KeyCtrl) {
     if (document_.dirty())
       confirm_new_ = true;
@@ -915,6 +978,9 @@ void Editor::draw() {
   ImGui::SameLine();
   if (ImGui::Button("Save"))
     save_level();
+  ImGui::SameLine();
+  if (ImGui::Button("Save As"))
+    save_level_as();
   ImGui::Separator();
   ImGui::InputText("PNG path", tileset_path_, sizeof(tileset_path_));
   ImGui::InputInt("Tile width", &tile_width_);

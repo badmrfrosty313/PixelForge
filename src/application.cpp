@@ -64,8 +64,12 @@ int run(bool smoke) {
       if (event.type == SDL_EVENT_QUIT ||
           (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
            event.window.windowID == SDL_GetWindowID(window.get())))
-        running = false;
+        editor.request_close();
     }
+    if (editor.should_close())
+      running = false;
+    if (!running)
+      break;
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
@@ -79,6 +83,8 @@ int run(bool smoke) {
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer.get());
     if (!SDL_RenderPresent(renderer.get()))
       throw std::runtime_error(SDL_GetError());
+    if (editor.should_close())
+      running = false;
     if (smoke && ++frames == 3)
       running = false;
   }

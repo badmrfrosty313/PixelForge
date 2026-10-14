@@ -1,5 +1,16 @@
 #include "serialization.hpp"
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <fstream>
+#include <random>
+#include <system_error>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <cerrno>
+#endif
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <unordered_set>
@@ -33,6 +44,33 @@ void layer_keys(const json &j, int version) {
     keys(j, {"name", "tiles", "visible", "locked"}, "layer");
   else
     keys(j, {"name", "tiles", "visible", "locked"}, "layer");
+}
+std::filesystem::path temporary_path(const std::filesystem::path &target) {
+  static std::atomic<std::uint64_t> sequence{0};
+  std::random_device random;
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto suffix = std::to_string(stamp) + "-" +
+                      std::to_string(random()) + "-" +
+                      std::to_string(sequence.fetch_add(1));
+  auto filename = target.filename();
+  filename += ".tmp-";
+  filename += suffix;
+  return target.parent_path().empty()
+             ? std::filesystem::path(filename)
+             : target.parent_path() / filename;
+}
+void replace_file(const std::filesystem::path &source,
+                  const std::filesystem::path &target) {
+#ifdef _WIN32
+  if (!MoveFileExW(source.c_str(), target.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    throw std::system_error(static_cast<int>(GetLastError()),
+                            std::system_category(), "Cannot replace level file");
+#else
+  if (std::rename(source.c_str(), target.c_str()) != 0)
+    throw std::system_error(errno, std::generic_category(),
+                            "Cannot replace level file");
+#endif
 }
 } // namespace
 std::string serialize(const Level &l) {
@@ -158,9 +196,31 @@ Level deserialize(const std::string &data) {
 }
 void save(const Level &l, const std::filesystem::path &p) {
   const auto data = serialize(l);
-  std::ofstream out(p, std::ios::binary | std::ios::trunc);
-  if (!out || !(out << data) || !out.flush())
-    throw std::runtime_error("Cannot write level: " + p.string());
+  if (p.empty())
+    throw std::invalid_argument("Level path cannot be empty");
+  const auto temporary = temporary_path(p);
+  try {
+    {
+      std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+      if (!out)
+        throw std::runtime_error("Cannot create temporary level file: " +
+                                 temporary.string());
+      out.write(data.data(), static_cast<std::streamsize>(data.size()));
+      out.flush();
+      if (!out)
+        throw std::runtime_error("Cannot write temporary level file: " +
+                                 temporary.string());
+      out.close();
+      if (!out)
+        throw std::runtime_error("Cannot finish temporary level file: " +
+                                 temporary.string());
+    }
+    replace_file(temporary, p);
+  } catch (...) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    throw;
+  }
 }
 Level load(const std::filesystem::path &p) {
   std::ifstream in(p, std::ios::binary | std::ios::ate);

@@ -46,7 +46,8 @@ class Editor {
   int gesture_value_ = 1;
   Tool tool_ = Tool::pencil;
   std::string status_ = "Ready";
-  bool confirm_new_ = false, confirm_open_ = false;
+  bool confirm_new_ = false, confirm_open_ = false, confirm_close_ = false;
+  bool close_requested_ = false;
   void toolbar();
   void layers_panel();
   void canvas();
@@ -56,12 +57,15 @@ class Editor {
   void set_active_layer(int index);
   void open_path();
   void new_level();
-  void save_level();
+  bool save_level();
+  bool save_level_as();
   void mark_dirty_status();
 
 public:
   explicit Editor(SDL_Renderer *renderer);
   bool assets_ready() const noexcept { return tileset_.loaded(); }
+  void request_close();
+  bool should_close() const noexcept { return close_requested_; }
   void draw();
 };
 } // namespace pf
