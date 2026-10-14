@@ -215,6 +215,9 @@ int main(int argc, char **argv) {
     rejects([&] {
       resolve_asset_path("assets/../../outside.png", doc_file, resource_dir);
     });
+    rejects([&] {
+      resolve_asset_path("assets/missing.png", doc_file, resource_dir);
+    });
     std::filesystem::remove_all(asset_root);
     std::filesystem::create_directory(failure_target);
     const auto marker = failure_target / "preserved.txt";

@@ -106,8 +106,14 @@ int run(bool smoke) {
   while (running) {
     if (smoke && frames == 1)
       editor.start_smoke_playtest(Genre::top_down_rpg);
-    if (smoke && frames == 3)
+    if (smoke && frames == 2) {
+      editor.stop_playtest();
+      editor.start_smoke_playtest(Genre::top_down_rpg);
+    }
+    if (smoke && frames == 3) {
+      editor.stop_playtest();
       editor.start_smoke_playtest(Genre::platformer);
+    }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       ImGui_ImplSDL3_ProcessEvent(&event);
@@ -148,6 +154,8 @@ int run(bool smoke) {
     if (smoke && ++frames == 4)
       running = false;
   }
+  if (smoke)
+    editor.stop_playtest();
   return 0;
 }
 } // namespace pf

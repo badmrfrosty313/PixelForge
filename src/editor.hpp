@@ -89,6 +89,7 @@ public:
   explicit Editor(SDL_Renderer *renderer, float display_scale = 1.0f);
   void set_display_scale(float scale);
   void start_smoke_playtest(Genre genre);
+  void stop_playtest();
   bool assets_ready() const noexcept { return tileset_.loaded(); }
   void request_close();
   bool should_close() const noexcept { return close_requested_; }

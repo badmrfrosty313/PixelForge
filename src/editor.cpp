@@ -134,6 +134,7 @@ void Editor::set_display_scale(float scale) {
   apply_ui_scale(target);
 }
 void Editor::start_smoke_playtest(Genre genre) {
+  stop_playtest();
   const auto filename = genre == Genre::top_down_rpg ? "rpg.json"
                                                        : "platformer.json";
   const auto sample = std::filesystem::absolute(resource_root_ / "examples" /
@@ -144,6 +145,10 @@ void Editor::start_smoke_playtest(Genre genre) {
     throw std::runtime_error("Cannot load the packaged playtest example");
   playtest_ = std::make_unique<gameplay::Session>(document_.level());
   last_playtest_frame_ = std::chrono::steady_clock::now();
+}
+void Editor::stop_playtest() {
+  playtest_.reset();
+  focus_editor_canvas_ = true;
 }
 void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
   const ImGuiDockNode *existing = ImGui::DockBuilderGetNode(dockspace_id);
@@ -371,6 +376,7 @@ void Editor::open_path(const std::filesystem::path &path) {
         resolve_asset_path(loaded.tileset_path, target, resource_root_);
     tileset_.load(renderer_, asset_path, loaded.atlas_tile_width,
                   loaded.atlas_tile_height);
+    stop_playtest();
     std::snprintf(tileset_path_, sizeof(tileset_path_), "%s",
                   loaded.tileset_path.c_str());
     tile_width_ = loaded.atlas_tile_width;
@@ -405,6 +411,7 @@ void Editor::new_level() {
     level.atlas_tile_height = tile_height_;
     level.tileset_path = tileset_path_;
     level.validate();
+    stop_playtest();
     document_ = Document(std::move(level));
     document_path_.clear();
     set_active_layer(0);
@@ -483,8 +490,7 @@ void Editor::toolbar() {
         playtest_->reset();
       ImGui::SameLine();
       if (ImGui::Button("Stop")) {
-        playtest_.reset();
-        focus_editor_canvas_ = true;
+        stop_playtest();
       }
       ImGui::SameLine(0, 14);
       ImGui::Checkbox("Debug overlay", &debug_overlay_);
