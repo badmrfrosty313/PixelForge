@@ -97,8 +97,7 @@ if(PIXELFORGE_EDITOR)
  install(DIRECTORY assets/ DESTINATION assets)
  install(DIRECTORY examples/ DESTINATION examples)
  install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md DESTINATION .)
- install(FILES docs/release-readiness.md docs/release-notes-v1.0.0.md
-              docs/release-notes-v1.0.0-rc2.md DESTINATION docs)
+ install(FILES docs/release-readiness.md docs/release-notes-v1.0.0.md DESTINATION docs)
  install(DIRECTORY docs/screenshots/ DESTINATION docs/screenshots)
  install(FILES "${SDL3_SOURCE_DIR}/LICENSE.txt"
          DESTINATION licenses RENAME SDL3-LICENSE.txt)
