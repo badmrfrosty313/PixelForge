@@ -15,7 +15,8 @@ struct DialogMailbox;
 struct VisualControlGeometry {
   std::string window, label;
   std::array<float, 4> bounds{}, clip_bounds{};
-  bool visible = false, clipped_horizontally = false;
+  bool visible = false, clipped_horizontally = false,
+       clipped_vertically = false, vertically_scrollable = false;
 };
 enum class Tool {
   pencil,
@@ -40,6 +41,7 @@ class Editor {
   std::chrono::steady_clock::time_point last_playtest_frame_;
   SDL_Renderer *renderer_;
   ImGuiStyle base_style_;
+  ImFont *status_font_ = nullptr;
   std::filesystem::path document_path_;
   std::filesystem::path resource_root_;
   std::filesystem::path pending_open_path_, pending_tileset_source_;

@@ -6,6 +6,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 
 try:
     from PIL import Image, ImageChops, ImageEnhance
@@ -24,11 +25,45 @@ def main() -> int:
                         help="Maximum changed-pixel ratio after per-channel tolerance")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    capture_started = time.perf_counter()
     run = subprocess.run([str(args.binary.resolve()), "--visual-test", "--output-dir", str(args.output_dir.resolve())])
+    capture_seconds = time.perf_counter() - capture_started
     if run.returncode:
         return run.returncode
 
     captures = sorted((args.output_dir / "screenshots").glob("*.png"))
+    layout = json.loads((args.output_dir / "layout-report.json").read_text(encoding="utf-8"))
+    # A contact sheet gives reviewers a fast overview without replacing the
+    # full-size native captures or requiring them to approve baselines.
+    selected = [scene for scene in layout["scenes"]
+                if scene["ui_scale_percent"] == 100
+                and (scene["resolution"] == [1662, 896]
+                     or (scene["name"] == "resized-window"
+                         and scene["resolution"] == [1578, 851]))]
+    if len(selected) != 12:
+        print(f"Expected 12 representative contact-sheet scenes, found {len(selected)}",
+              file=sys.stderr)
+        return 2
+    columns, thumb_width, gap, caption_height = 3, 480, 16, 34
+    thumb_height = round(thumb_width * 896 / 1662)
+    rows = (len(selected) + columns - 1) // columns
+    sheet = Image.new("RGB", (gap + columns * (thumb_width + gap),
+                              gap + rows * (thumb_height + caption_height + gap)),
+                      (32, 37, 44))
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(sheet)
+    for index, scene in enumerate(selected):
+        capture = args.output_dir / "screenshots" / scene["screenshot"]
+        with Image.open(capture).convert("RGB") as image:
+            image.thumbnail((thumb_width, thumb_height), Image.Resampling.LANCZOS)
+            x = gap + (index % columns) * (thumb_width + gap)
+            y = gap + (index // columns) * (thumb_height + caption_height + gap)
+            sheet.paste(image, (x, y))
+            draw.text((x, y + thumb_height + 8), scene["name"], fill=(235, 240, 246))
+    sheet.save(args.output_dir / "contact-sheet.png", optimize=True)
+    performance = {"native_capture_seconds": round(capture_seconds, 3),
+                   "screenshot_count": len(captures),
+                   "layout_assertion_count": layout.get("layout_assertion_count", 0)}
     comparisons, failures = [], []
     diff_dir = args.output_dir / "comparison-diffs"
     diff_dir.mkdir(exist_ok=True)
@@ -69,13 +104,23 @@ def main() -> int:
     report = {"schema_version": 1, "baseline_directory": str(args.baseline_dir),
               "approved_baselines_compared": len(comparisons), "comparisons": comparisons,
               "failures": failures, "status": "passed" if not failures else "failed"}
+    performance["baseline_comparison_count"] = len(comparisons)
+    (args.output_dir / "qa-performance.json").write_text(
+        json.dumps(performance, indent=2) + "\n", encoding="utf-8")
     (args.output_dir / "comparison-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     summary_path = args.output_dir / "summary.md"
     with summary_path.open("a", encoding="utf-8") as summary:
+        summary.write(f"\nNative capture time: {capture_seconds:.3f} seconds. Contact sheet: `contact-sheet.png`.\n")
         summary.write(f"\nApproved baselines compared: {len(comparisons)}. Changed-pixel failures: {len(failures)}.\n")
         if not comparisons:
             summary.write("No approved baseline PNGs are present; comparison was skipped. Baselines are never accepted automatically.\n")
     gallery_path = args.output_dir / "index.html"
+    gallery = gallery_path.read_text(encoding="utf-8")
+    gallery = gallery.replace(
+        "<h1>PixelForge Visual QA</h1>",
+        "<h1>PixelForge Visual QA</h1><h2>Overview</h2><p><a href='contact-sheet.png'>Open the 12-scene contact sheet</a></p><p>Full-size images below are native PixelForge captures.</p>",
+        1)
+    gallery_path.write_text(gallery, encoding="utf-8")
     with gallery_path.open("a", encoding="utf-8") as gallery:
         if comparisons:
             gallery.write("<h2>Approved baseline comparisons</h2><main>")

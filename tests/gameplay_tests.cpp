@@ -165,6 +165,18 @@ int main(int argc, char **argv) {
           "camera projection keeps rendered feet flush with support tile");
     close(screen_player.left, camera.project(flat_bounds.left, 0).x, 0.001f,
           "player hitbox uses the shared tile-to-screen camera scale");
+    const auto round_trip = camera.unproject(screen_floor.x, screen_floor.y);
+    close(round_trip.x, 2.5f, 0.001f,
+          "camera inverse recovers horizontal world position");
+    close(round_trip.y, 8.0f, 0.001f,
+          "camera inverse recovers vertical world position");
+    const pf::coordinates::TileGridTransform grid{38.0f, 72.0f, 30.0f, 18.0f};
+    const auto grid_screen = grid.project(4.25f, 7.5f);
+    const auto grid_tile = grid.unproject(grid_screen.x, grid_screen.y);
+    close(grid_tile.x, 4.25f, 0.001f,
+          "mouse-to-tile transform round-trips non-square tile width");
+    close(grid_tile.y, 7.5f, 0.001f,
+          "mouse-to-tile transform round-trips non-square tile height");
 
     auto elevated = make_floor(14, 12, 9);
     for (int x = 4; x <= 8; ++x)

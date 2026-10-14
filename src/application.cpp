@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <cmath>
 #include <nlohmann/json.hpp>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -254,6 +255,7 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
             }
           }
           nlohmann::json record = {{"name", scene.name}, {"resolution", {capture_width, capture_height}}, {"ui_scale_percent", scales[scale]}, {"screenshot", filename}, {"windows", nlohmann::json::array()}, {"failures", nlohmann::json::array()}};
+          std::size_t scene_assertions = 0;
           record["controls"] = nlohmann::json::array();
           for (const auto &control : editor.visual_controls()) {
             record["controls"].push_back({{"window", control.window},
@@ -261,9 +263,15 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
                                            {"bounds", control.bounds},
                                            {"clip_bounds", control.clip_bounds},
                                            {"visible", control.visible},
-                                           {"clipped_horizontally", control.clipped_horizontally}});
+                                           {"clipped_horizontally", control.clipped_horizontally},
+                                           {"clipped_vertically", control.clipped_vertically},
+                                           {"vertically_scrollable", control.vertically_scrollable}});
+            ++scene_assertions;
             if (control.visible && control.clipped_horizontally)
               record["failures"].push_back(std::string("Visible control clipped horizontally: ") + control.window + "/" + control.label);
+            ++scene_assertions;
+            if (control.clipped_vertically && !control.vertically_scrollable)
+              record["failures"].push_back(std::string("Control clipped vertically without a scrollable parent: ") + control.window + "/" + control.label);
           }
           const auto &canvas = editor.visual_geometry();
           if (!scene.playtest) {
@@ -277,10 +285,35 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
                                                          canvas.map_height_tiles}},
                                  {"zoom", canvas.zoom},
                                  {"ui_scale_percent", canvas.ui_scale_percent}};
-            if (std::string_view(scene.name) == "large-map-fit" &&
-                (canvas.map_width > canvas.canvas_width + 1.0f ||
-                 canvas.map_height > canvas.canvas_height + 1.0f))
-              record["failures"].push_back("Large map does not fit within canvas bounds");
+            const std::string_view scene_name(scene.name);
+            const bool should_fit = scene_name == "rpg-editor" ||
+                                    scene_name == "platformer-editor" ||
+                                    scene_name == "large-map-fit";
+            if (should_fit) {
+              const float map_right = canvas.map_x + canvas.map_width;
+              const float map_bottom = canvas.map_y + canvas.map_height;
+              const float map_center_x = canvas.map_x + canvas.map_width * 0.5f;
+              const float map_center_y = canvas.map_y + canvas.map_height * 0.5f;
+              const float canvas_center_x = canvas.canvas_x + canvas.canvas_width * 0.5f;
+              const float canvas_center_y = canvas.canvas_y + canvas.canvas_height * 0.5f;
+              record["canvas"]["map_padding"] = {
+                  canvas.map_x - canvas.canvas_x,
+                  canvas.map_y - canvas.canvas_y,
+                  canvas.canvas_x + canvas.canvas_width - map_right,
+                  canvas.canvas_y + canvas.canvas_height - map_bottom};
+              record["canvas"]["center_offset"] = {
+                  map_center_x - canvas_center_x, map_center_y - canvas_center_y};
+              ++scene_assertions;
+              if (canvas.map_x < canvas.canvas_x - 1.0f ||
+                  canvas.map_y < canvas.canvas_y - 1.0f ||
+                  map_right > canvas.canvas_x + canvas.canvas_width + 1.0f ||
+                  map_bottom > canvas.canvas_y + canvas.canvas_height + 1.0f)
+                record["failures"].push_back("Initial tilemap framing crops the level");
+              ++scene_assertions;
+              if (std::abs(map_center_x - canvas_center_x) > 2.0f ||
+                  std::abs(map_center_y - canvas_center_y) > 2.0f)
+                record["failures"].push_back("Initial tilemap framing is not centered");
+            }
           }
           ImGuiViewport *viewport = ImGui::GetMainViewport();
           const ImVec2 view_min = viewport->Pos, view_max(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y);
@@ -289,25 +322,62 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
                                                 viewport->Pos.y + viewport->Size.y}},
                                  {"work_size", {viewport->WorkSize.x,
                                                 viewport->WorkSize.y}}};
+          record["viewport_aspect_ratio"] = capture_height > 0
+                                                  ? static_cast<float>(capture_width) / capture_height
+                                                  : 0.0f;
+          ++scene_assertions;
+          if (capture_height <= 0 || capture_width / static_cast<float>(capture_height) < 1.25f ||
+              capture_width / static_cast<float>(capture_height) > 2.1f)
+            record["failures"].push_back("Viewport aspect ratio is outside the supported QA range");
           for (ImGuiWindow *item : ImGui::GetCurrentContext()->Windows) {
             if (!item || item->Hidden || !item->WasActive ||
                 item->HiddenFramesCanSkipItems > 0)
               continue;
             const ImVec2 min = item->Pos, max(item->Pos.x + item->Size.x, item->Pos.y + item->Size.y);
             record["windows"].push_back({{"name", item->Name}, {"bounds", {min.x, min.y, max.x, max.y}}, {"content_region", {item->InnerRect.Min.x, item->InnerRect.Min.y, item->InnerRect.Max.x, item->InnerRect.Max.y}}, {"content_extent_bounds", {item->DC.CursorPosPrevLine.x, item->DC.CursorPosPrevLine.y, item->DC.CursorMaxPos.x, item->DC.CursorMaxPos.y}}, {"scroll", {item->Scroll.x, item->Scroll.y}}, {"scroll_max", {item->ScrollMax.x, item->ScrollMax.y}}});
+            ++scene_assertions;
             if (item->Size.x <= 0 || item->Size.y <= 0)
               record["failures"].push_back(std::string("Invalid window geometry: ") + item->Name);
+            ++scene_assertions;
             if (max.x < view_min.x || max.y < view_min.y || min.x > view_max.x || min.y > view_max.y)
               record["failures"].push_back(std::string("Window outside viewport: ") + item->Name);
-            if (std::string_view(item->Name).starts_with("Level Canvas") && (item->InnerRect.GetWidth() < 240 || item->InnerRect.GetHeight() < 160))
-              record["failures"].push_back("Canvas below 240x160 practical minimum");
+            if (std::string_view(item->Name).starts_with("Level Canvas")) {
+              ++scene_assertions;
+              if (item->InnerRect.GetWidth() < 240 || item->InnerRect.GetHeight() < 160)
+                record["failures"].push_back("Canvas below 240x160 practical minimum");
+            }
+            const float window_width = max.x - min.x;
+            const float window_height = max.y - min.y;
+            if (std::string_view(item->Name).starts_with("Toolbar")) {
+              ++scene_assertions;
+              if (window_height > capture_height * 0.28f)
+                record["failures"].push_back("Toolbar consumes more than 28% of the viewport height");
+            }
+            if (std::string_view(item->Name).starts_with("Status")) {
+              ++scene_assertions;
+              if (window_height > capture_height * 0.23f)
+                record["failures"].push_back("Status panel consumes more than 23% of the viewport height");
+            }
+            if (std::string_view(item->Name).starts_with("Tileset Palette") ||
+                std::string_view(item->Name).starts_with("Layers") ||
+                std::string_view(item->Name).starts_with("Entities")) {
+              ++scene_assertions;
+              if (window_width < 190.0f || window_width > capture_width * 0.42f)
+                record["failures"].push_back(std::string("Sidebar width is not usable: ") + item->Name);
+            }
           }
+          record["layout_assertions"] = scene_assertions;
           for (const auto &failure : record["failures"])
             layout_report["failures"].push_back({{"scene", scene.name}, {"resolution", {capture_width, capture_height}}, {"scale", scales[scale]}, {"message", failure}});
           layout_report["scenes"].push_back(std::move(record));
         }
       }
     }
+    layout_report["layout_assertion_count"] = 1;
+    for (const auto &scene : layout_report["scenes"])
+      layout_report["layout_assertion_count"] =
+          layout_report["layout_assertion_count"].get<std::size_t>() +
+          scene["layout_assertions"].get<std::size_t>();
     layout_report["passed"] = layout_report["failures"].empty();
     gameplay_report["passed"] = gameplay_report["failures"].empty();
     std::ofstream report(visual_output / "layout-report.json");
@@ -324,7 +394,7 @@ int run(bool smoke, const std::filesystem::path &visual_output) {
       gallery << "<figure><img loading='lazy' src='screenshots/" << scene["screenshot"].get<std::string>() << "'><figcaption>" << scene["name"] << " — " << scene["resolution"][0] << "×" << scene["resolution"][1] << " — " << scene["ui_scale_percent"] << "%</figcaption></figure>";
     gallery << "</main>";
     std::ofstream summary(visual_output / "summary.md");
-    summary << "# PixelForge Visual QA\n\nCaptured " << layout_report["scenes"].size() << " real SDL/ImGui frames across four resolutions, four UI scales, and twelve scenes.\n\nLayout/gameplay failures: " << layout_report["failures"].size() << ". See `layout-report.json`, `gameplay-report.json`, and `index.html`.\n";
+    summary << "# PixelForge Visual QA\n\nCaptured " << layout_report["scenes"].size() << " real SDL/ImGui frames across four resolutions, four UI scales, and twelve scenes.\n\nLayout assertions: " << layout_report["layout_assertion_count"] << ". Layout/gameplay failures: " << layout_report["failures"].size() << ". The report includes crop/centering, panel and canvas geometry, toolbar/status size, control clipping, and intentional scroll checks. See `layout-report.json`, `gameplay-report.json`, and `index.html`.\n";
     if (!layout_report["failures"].empty()) return 1;
     return 0;
   }

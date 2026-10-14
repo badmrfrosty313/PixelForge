@@ -131,6 +131,8 @@ void Editor::apply_ui_scale(int percent) {
   font_config.OversampleH = 2;
   font_config.OversampleV = 1;
   io.FontDefault = io.Fonts->AddFontDefault(&font_config);
+  font_config.SizePixels = 14.0f * scale;
+  status_font_ = io.Fonts->AddFontDefault(&font_config);
   if (!io.Fonts->Build() || !ImGui_ImplSDLRenderer3_CreateFontsTexture())
     throw std::runtime_error("Cannot rebuild the scaled UI font atlas");
   io.FontGlobalScale = 1.0f;
@@ -169,8 +171,6 @@ void Editor::visual_load_demo(Genre genre, bool playtest) {
   open_path(resource_root_ / "examples" / filename);
   if (document_path_.filename() != filename)
     throw std::runtime_error("Visual QA could not load bundled demo");
-  zoom_ = 1.0f;
-  pan_x_ = pan_y_ = 20.0f;
 }
 void Editor::visual_create_large_map() {
   stop_playtest();
@@ -233,9 +233,9 @@ void Editor::set_default_layout(ImGuiID dockspace_id, bool force) {
                                 ? (compact_viewport ? 0.32f : 0.29f)
                                 : 0.25f;
   ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,
-                              large_ui ? 0.32f : 0.15f, &top, &center);
+                              large_ui ? 0.20f : 0.15f, &top, &center);
   ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,
-                              large_ui ? 0.35f : 0.20f, &bottom, &center);
+                              large_ui ? 0.26f : 0.20f, &bottom, &center);
   ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, side_width, &left,
                               &center);
   ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, right_width, &right,
@@ -294,12 +294,20 @@ void Editor::record_visual_control(const char *label) {
     return;
   const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
   const ImRect clip = window->InnerClipRect;
+  const bool clipped_vertically = min.y < clip.Min.y - 1.0f ||
+                                   max.y > clip.Max.y + 1.0f;
+  bool vertically_scrollable = false;
+  for (const ImGuiWindow *parent = window; parent; parent = parent->ParentWindow)
+    vertically_scrollable = vertically_scrollable ||
+                            (parent->ScrollMax.y > 0.0f &&
+                             !(parent->Flags & ImGuiWindowFlags_NoScrollbar));
   visual_controls_.push_back({window->Name, label,
                               {min.x, min.y, max.x, max.y},
                               {clip.Min.x, clip.Min.y, clip.Max.x, clip.Max.y},
                               ImGui::IsItemVisible(),
                               horizontally_clipped(min.x, max.x, clip.Min.x,
-                                                   clip.Max.x)});
+                                                   clip.Max.x),
+                              clipped_vertically, vertically_scrollable});
 }
 bool Editor::visual_overflow_probe() noexcept {
   return horizontally_clipped(95.0f, 110.0f, 0.0f, 100.0f);
@@ -402,6 +410,7 @@ bool Editor::save_level_to(const std::filesystem::path &path) {
     }
     save(document_.level(), target);
     document_path_ = target;
+    fit_requested_ = true;
     document_.mark_saved();
     status_ = "Saved";
     return true;
@@ -475,6 +484,7 @@ void Editor::open_path(const std::filesystem::path &path) {
     level_tile_width_ = document_.level().tile_width;
     level_tile_height_ = document_.level().tile_height;
     set_active_layer(0);
+    fit_requested_ = true;
     status_ = "Opened " + path_text(target.filename());
   } catch (const std::exception &e) {
     report_error(e.what());
@@ -610,12 +620,12 @@ void Editor::toolbar() {
         document_.redo();
       ImGui::EndDisabled();
       record_visual_control("Redo");
-      if (ui_scale_percent_ < 200)
-        ImGui::SameLine();
-      ImGui::TextUnformatted("Tool");
       ImGui::SameLine();
-      ImGui::SetNextItemWidth(ImGui::GetWindowWidth() < 1100.0f ? 118.0f
-                                                               : 145.0f);
+      ImGui::SetNextItemWidth(
+          ui_scale_percent_ >= 200 ? 170.0f
+                                   : (ImGui::GetWindowWidth() < 1100.0f
+                                          ? 118.0f
+                                          : 145.0f));
       if (ImGui::BeginCombo("##active-tool", tool_name(tool_))) {
         for (const auto tool : {Tool::pencil, Tool::eraser, Tool::rectangle,
                                 Tool::line, Tool::fill, Tool::eyedropper,
@@ -628,23 +638,30 @@ void Editor::toolbar() {
         }
         ImGui::EndCombo();
       }
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Active editing tool");
       record_visual_control("Tool selector");
       ImGui::SameLine();
       ImGui::Checkbox("Grid", &grid_visible_);
       record_visual_control("Grid toggle");
       ImGui::SameLine();
-      ImGui::Checkbox("Collision", &collision_visible_);
+      ImGui::Checkbox(ui_scale_percent_ >= 200 ? "Coll." : "Collision",
+                      &collision_visible_);
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Collision overlay");
       record_visual_control("Collision toggle");
       ImGui::SameLine();
       if (ImGui::Button("Fit"))
         fit_requested_ = true;
       record_visual_control("Fit");
       ImGui::SameLine();
-      if (ImGui::Button("Reset zoom")) {
+      if (ImGui::Button("100%")) {
         zoom_ = 1;
         pan_x_ = 20;
         pan_y_ = 20;
       }
+      if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Reset zoom to 100%%");
       record_visual_control("Reset zoom");
     }
   }
@@ -1021,9 +1038,11 @@ void Editor::canvas() {
   float cell_x = document_.level().tile_width * zoom_;
   float cell_y = document_.level().tile_height * zoom_;
   ImVec2 origin(pos.x + pan_x_, pos.y + pan_y_);
+  coordinates::TileGridTransform grid{origin.x, origin.y, cell_x, cell_y};
   auto cursor_cell = [&]() {
-    int x = static_cast<int>(std::floor((io.MousePos.x - origin.x) / cell_x)),
-        y = static_cast<int>(std::floor((io.MousePos.y - origin.y) / cell_y));
+    const auto tile = grid.unproject(io.MousePos.x, io.MousePos.y);
+    int x = static_cast<int>(std::floor(tile.x));
+    int y = static_cast<int>(std::floor(tile.y));
     return std::pair{x, y};
   };
   auto [mx, my] = cursor_cell();
@@ -1051,8 +1070,9 @@ void Editor::canvas() {
     } else if (tool_ == Tool::entity) {
       const auto &entities = document_.level().entities;
       const Entity *found = nullptr;
-      const float world_x = (io.MousePos.x - origin.x) / cell_x;
-      const float world_y = (io.MousePos.y - origin.y) / cell_y;
+      const auto world = grid.unproject(io.MousePos.x, io.MousePos.y);
+      const float world_x = world.x;
+      const float world_y = world.y;
       for (auto it = entities.rbegin(); it != entities.rend(); ++it)
         if (std::abs(it->x - world_x) < 0.5f &&
             std::abs(it->y - world_y) < 0.5f) {
@@ -1180,16 +1200,20 @@ void Editor::canvas() {
   draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
                       IM_COL32(25, 28, 34, 255));
   if (fit_requested_) {
-    zoom_ = std::clamp(std::min(size.x / (document_.level().width *
-                                          document_.level().tile_width),
-                                size.y / (document_.level().height *
-                                          document_.level().tile_height)),
+    constexpr float fit_padding = 0.94f;
+    zoom_ = std::clamp(std::min(size.x * fit_padding /
+                                          (document_.level().width *
+                                           document_.level().tile_width),
+                                size.y * fit_padding /
+                                          (document_.level().height *
+                                           document_.level().tile_height)),
                        0.05f, 6.0f);
     cell_x = document_.level().tile_width * zoom_;
     cell_y = document_.level().tile_height * zoom_;
     pan_x_ = (size.x - document_.level().width * cell_x) * 0.5f;
     pan_y_ = (size.y - document_.level().height * cell_y) * 0.5f;
     origin = ImVec2(pos.x + pan_x_, pos.y + pan_y_);
+    grid = {origin.x, origin.y, cell_x, cell_y};
     fit_requested_ = false;
   }
   visual_geometry_ = {pos.x, pos.y, size.x, size.y, origin.x, origin.y,
@@ -1590,9 +1614,15 @@ void Editor::draw() {
   layers_panel();
   entity_inspector();
   canvas();
+  const bool compact_status = ui_scale_percent_ >= 150;
+  if (compact_status)
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                        ImVec2(ImGui::GetStyle().WindowPadding.x, 8.0f));
   ImGui::Begin("Status", nullptr,
                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+  if (ui_scale_percent_ >= 150 && status_font_)
+    ImGui::PushFont(status_font_);
   char cursor[48];
   if (cursor_on_level_)
     std::snprintf(cursor, sizeof(cursor), "Cursor: %d, %d", cursor_cell_x_,
@@ -1613,7 +1643,11 @@ void Editor::draw() {
                   .name.c_str(),
               cursor, tool_name(tool_), zoom_ * 100.0f, status_.c_str());
   record_visual_control("Status details");
+  if (ui_scale_percent_ >= 150 && status_font_)
+    ImGui::PopFont();
   ImGui::End();
+  if (compact_status)
+    ImGui::PopStyleVar();
   if (error_popup_pending_) {
     ImGui::OpenPopup("File operation failed");
     error_popup_pending_ = false;
