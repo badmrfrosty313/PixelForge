@@ -1,8 +1,11 @@
 #pragma once
 #include "document.hpp"
+#include "gameplay.hpp"
 #include "tileset.hpp"
 #include <SDL3/SDL.h>
+#include <chrono>
 #include <filesystem>
+#include <memory>
 namespace pf {
 enum class Tool {
   pencil,
@@ -17,6 +20,8 @@ enum class Tool {
 class Editor {
   Document document_;
   Tileset tileset_;
+  std::unique_ptr<gameplay::Session> playtest_;
+  std::chrono::steady_clock::time_point last_playtest_frame_;
   SDL_Renderer *renderer_;
   std::filesystem::path document_path_;
   char path_[512] = "level.json";
@@ -45,6 +50,7 @@ class Editor {
   void toolbar();
   void layers_panel();
   void canvas();
+  void playtest_canvas();
   void entity_inspector();
   void sync_entity_fields();
   void set_active_layer(int index);

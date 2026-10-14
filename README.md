@@ -32,7 +32,9 @@ The editor creates maps from 1–256 cells per dimension with either `top_down_r
 
 Enter a JSON path in the Tileset Palette panel and click Open or Save. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading and creating a new map prompt before discarding edits. Closing the application currently does not prompt, so save before exiting. Save overwrites the named file directly; keep backups for important maps.
 
-The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level.
+The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level. The Entity tool places and moves entities; the Entities panel edits type, position, name/message properties, and deletion. The Collision tool paints an independent solid grid with an optional overlay.
+
+Click **Play** to run an isolated copy of the current level. Click the canvas to focus controls. Arrows or WASD move; Space or Up jumps in the platformer; E interacts with nearby RPG NPCs. Pause, Reset, and Stop are in the toolbar. Runtime collection, movement, and checkpoints do not modify the editor document.
 
 ## Architecture
 
@@ -43,7 +45,7 @@ The Layers panel supports creating, renaming, deleting, reordering, hiding, lock
 - `rendering`: tile rendering helpers.
 - `level`: shared tile/layer/collision/entity model, independent of SDL.
 - `serialization`: strict versioned JSON validation and filesystem I/O, independent of UI.
-- `gameplay`: reserved boundary for genre controllers; no physics or simulation yet.
+- `gameplay`: runtime world conversion, fixed-step session, shared collision, and isolated top-down/platformer controllers.
 
 Version 2 saves include genre, map and tile dimensions, a safe relative tileset reference and atlas cell size, ordered visual layers with visibility/lock state, row-major tile data, an explicit boolean collision grid, and typed entities with stable IDs and JSON properties. Version 1 files remain readable; missing layer state defaults to visible and unlocked, tile size defaults to 24x24, and the bundled atlas is selected. Unknown fields and unsupported versions are rejected instead of discarded. Paths must be relative and cannot traverse upward. Inputs and serialized documents are capped at 16 MiB.
 
@@ -51,9 +53,9 @@ Model tests cover geometry and collision bounds, v1 migration, v2 round-trips fo
 
 ## Validation and limitations
 
-Use CTest as above. The current automated test programs report 42 model checks and 50 document checks; CTest also starts the real SDL/ImGui editor with its bundled PNG atlas. Manually on Windows: open both examples, paint/erase, use each tool, undo/redo a stroke and layer operation, hide/lock layers, zoom/pan/fit, save and reopen. A dummy-driver smoke pass cannot establish interactive desktop input or visual quality.
+Use CTest as above. The automated test programs currently report 64 model/serialization checks, 62 document/undo checks, and 24 gameplay checks. CTest also starts the real SDL/ImGui editor with its bundled PNG atlas using the dummy video driver. Manually on Windows, verify entity/collision editing and run both example playtests; graphical desktop controls and visual quality are not proven by the headless smoke test.
 
-No native file picker, close-time unsaved prompt, atomic save, gameplay runtime, Windows ZIP package, or genuine screenshots are included yet. Phase 2 introduces editable entity and collision data, but the controllers and playtest mode remain future work. Interactive desktop behavior and Windows runtime still require manual verification.
+No native file picker, close-time unsaved prompt, atomic save, Windows ZIP package, or genuine screenshots are included yet. The runtime is a minimal playtest: enemies have no AI, triggers only display a message, and animation/audio are absent. Interactive desktop behavior and Windows runtime still require manual verification.
 
 ## Studio Alpha Phase 1
 
@@ -72,15 +74,24 @@ The model test suite now covers grouped strokes and interpolation, undo/redo and
 ```mermaid
 flowchart TD
     UI[Dear ImGui editor and panels] --> DOC[Document commands and bounded history]
-    DOC --> LEVEL[Renderer-independent Level and Layers]
+    DOC --> LEVEL[Renderer-independent Level, layers, collision, entities]
     LEVEL --> JSON[Versioned JSON serialization]
-    UI --> CANVAS[Canvas view transform and tools]
+    UI --> CANVAS[Canvas view and tools]
     CANVAS --> DOC
     CANVAS --> ATLAS[Tileset PNG decoder and atlas slicing]
     ATLAS --> TEX[RAII-owned SDL texture]
     TEX --> DRAW[SDL renderer / ImGui draw lists]
+    LEVEL -. copied at Play .-> RUNTIME[Isolated runtime world]
+    RUNTIME --> TOPDOWN[TopDownController]
+    RUNTIME --> PLATFORMER[PlatformerController]
+    TOPDOWN --> FIXED[60 Hz Session updates]
+    PLATFORMER --> FIXED
 ```
 
 ## Studio Alpha Phase 2
 
 Phase 2 adds a renderer-independent entity model (player spawn, NPC, enemy, collectible, trigger, checkpoint, hazard) and explicit solid-cell collision data. The canvas exposes collision paint/erase with an overlay and entity placement, selection, dragging, deletion, and a basic property inspector. Entity and collision edits participate in undo/redo. Version 2 JSON persists all world-building data and remains able to load version 1 files. The two examples now include collision and representative RPG/platformer entities. See [Phase 2 design notes](docs/studio-alpha-phase2.md).
+
+## Studio Alpha Phase 3
+
+The built-in playtest runs a renderer-independent copy of the current level at a fixed 60 Hz. `TopDownController` handles normalized four-direction movement, collision, NPC interaction, and collectibles. `PlatformerController` handles horizontal movement, gravity, jumping, tile collision, checkpoints, hazards, and respawn. Both share the same bounds-solid collision world and runtime contact handling. Play, Pause, Reset, and Stop are available from the editor toolbar; see [Phase 3 design notes](docs/studio-alpha-phase3.md).

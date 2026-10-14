@@ -202,6 +202,39 @@ void Editor::toolbar() {
   ImGui::SetNextWindowPos(ImVec2(8, 28), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(1264, 52), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Toolbar")) {
+    if (playtest_) {
+      ImGui::TextUnformatted("PLAYTEST");
+      ImGui::SameLine();
+      if (ImGui::Button(playtest_->paused() ? "Resume" : "Pause"))
+        playtest_->set_paused(!playtest_->paused());
+      ImGui::SameLine();
+      if (ImGui::Button("Reset"))
+        playtest_->reset();
+      ImGui::SameLine();
+      if (ImGui::Button("Stop"))
+        playtest_.reset();
+      ImGui::SameLine();
+      ImGui::Text("%s", genre_name(document_.level().genre).c_str());
+      ImGui::End();
+      return;
+    }
+    if (ImGui::Button("Play")) {
+      try {
+        if (stroke_active_) {
+          document_.end_stroke();
+          stroke_active_ = false;
+        }
+        if (collision_stroke_active_) {
+          document_.end_collision_stroke();
+          collision_stroke_active_ = false;
+        }
+        playtest_ = std::make_unique<gameplay::Session>(document_.level());
+        last_playtest_frame_ = std::chrono::steady_clock::now();
+      } catch (const std::exception &error) {
+        status_ = error.what();
+      }
+    }
+    ImGui::SameLine();
     if (ImGui::Button(document_.can_undo() ? "Undo" : "Undo"))
       document_.undo();
     ImGui::SameLine();
@@ -464,6 +497,10 @@ void Editor::entity_inspector() {
   ImGui::End();
 }
 void Editor::canvas() {
+  if (playtest_) {
+    playtest_canvas();
+    return;
+  }
   ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Level Canvas");
@@ -758,9 +795,101 @@ void Editor::canvas() {
   draw->PopClipRect();
   ImGui::End();
 }
+void Editor::playtest_canvas() {
+  ImGui::SetNextWindowPos(ImVec2(278, 88), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(730, 680), ImGuiCond_FirstUseEver);
+  ImGui::Begin("Playtest");
+  const ImVec2 pos = ImGui::GetCursorScreenPos();
+  ImVec2 size = ImGui::GetContentRegionAvail();
+  size.x = std::max(size.x, 1.0f);
+  size.y = std::max(size.y, 1.0f);
+  ImGui::InvisibleButton("runtime-canvas", size);
+  const bool focused = ImGui::IsItemFocused();
+  const auto now = std::chrono::steady_clock::now();
+  const float elapsed =
+      std::chrono::duration<float>(now - last_playtest_frame_).count();
+  last_playtest_frame_ = now;
+  gameplay::Input input;
+  if (focused && !ImGui::GetIO().WantTextInput) {
+    input.left =
+        ImGui::IsKeyDown(ImGuiKey_LeftArrow) || ImGui::IsKeyDown(ImGuiKey_A);
+    input.right =
+        ImGui::IsKeyDown(ImGuiKey_RightArrow) || ImGui::IsKeyDown(ImGuiKey_D);
+    input.up =
+        ImGui::IsKeyDown(ImGuiKey_UpArrow) || ImGui::IsKeyDown(ImGuiKey_W);
+    input.down =
+        ImGui::IsKeyDown(ImGuiKey_DownArrow) || ImGui::IsKeyDown(ImGuiKey_S);
+    input.jump = ImGui::IsKeyPressed(ImGuiKey_Space) ||
+                 ImGui::IsKeyPressed(ImGuiKey_UpArrow) ||
+                 ImGui::IsKeyPressed(ImGuiKey_W);
+    input.interact = ImGui::IsKeyPressed(ImGuiKey_E);
+  }
+  playtest_->advance(elapsed, input);
+  const auto &level = playtest_->visual_level();
+  const auto &world = playtest_->world();
+  const auto &player = playtest_->player();
+  const float cell = std::clamp(std::min(size.x / std::min(level.width, 30),
+                                         size.y / std::min(level.height, 20)),
+                                8.0f, 40.0f);
+  const ImVec2 origin(pos.x + size.x * 0.5f - player.x * cell,
+                      pos.y + size.y * 0.5f - player.y * cell);
+  auto *draw = ImGui::GetWindowDrawList();
+  draw->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), true);
+  draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+                      IM_COL32(22, 26, 29, 255));
+  for (const auto &layer : level.layers) {
+    if (!layer.visible)
+      continue;
+    for (int y = 0; y < level.height; ++y)
+      for (int x = 0; x < level.width; ++x) {
+        const int tile =
+            layer.tiles[static_cast<std::size_t>(y * level.width + x)];
+        if (tile == 0)
+          continue;
+        const ImVec2 a(origin.x + x * cell, origin.y + y * cell);
+        const ImVec2 b(a.x + cell, a.y + cell);
+        draw_tile(draw, tileset_, tile, a, b);
+      }
+  }
+  for (const auto &entity : world.entities) {
+    if (entity.type == EntityType::player_spawn ||
+        entity.type == EntityType::collectible ||
+        entity.type == EntityType::npc || entity.type == EntityType::hazard ||
+        entity.type == EntityType::checkpoint ||
+        entity.type == EntityType::trigger) {
+      const ImVec2 center(origin.x + entity.x * cell,
+                          origin.y + entity.y * cell);
+      const ImU32 color =
+          entity.type == EntityType::npc           ? IM_COL32(80, 170, 255, 255)
+          : entity.type == EntityType::collectible ? IM_COL32(255, 215, 80, 255)
+          : entity.type == EntityType::hazard      ? IM_COL32(255, 75, 65, 255)
+                                              : IM_COL32(190, 125, 240, 255);
+      draw->AddCircleFilled(center, std::max(5.0f, cell * 0.22f), color);
+    }
+  }
+  const ImVec2 player_center(origin.x + player.x * cell,
+                             origin.y + player.y * cell);
+  draw->AddRectFilled(
+      ImVec2(player_center.x - cell * 0.28f, player_center.y - cell * 0.36f),
+      ImVec2(player_center.x + cell * 0.28f, player_center.y + cell * 0.36f),
+      IM_COL32(80, 235, 145, 255), 3.0f);
+  draw->AddText(ImVec2(pos.x + 10, pos.y + 10), IM_COL32_WHITE,
+                playtest_->paused()
+                    ? "Paused"
+                    : "Arrows / WASD move | Space jumps | E interacts");
+  if (!playtest_->message().empty())
+    draw->AddText(ImVec2(pos.x + 10, pos.y + 32), IM_COL32(255, 230, 125, 255),
+                  playtest_->message().c_str());
+  draw->PopClipRect();
+  ImGui::End();
+}
 void Editor::draw() {
   ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
   toolbar();
+  if (playtest_) {
+    canvas();
+    return;
+  }
   ImGui::SetNextWindowPos(ImVec2(8, 88), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(262, 680), ImGuiCond_FirstUseEver);
   ImGui::Begin("Tileset Palette");
