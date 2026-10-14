@@ -1,0 +1,5 @@
+PixelForge Studio Alpha demonstration tileset
+
+The pixel-art image in studio_tiles.png is original procedural artwork created for this project and dedicated to the public domain under CC0 1.0 Universal.
+
+To the extent possible under law, the author waives all copyright and related rights to this asset. The full legal code is available at https://creativecommons.org/publicdomain/zero/1.0/.

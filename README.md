@@ -13,7 +13,7 @@ ctest --test-dir build -C Release --output-on-failure
 .\build\Release\PixelForge.exe
 ```
 
-CMake FetchContent downloads pinned SDL 3.2.10, Dear ImGui 1.91.9b docking, and nlohmann JSON 3.12.0 sources from GitHub. SDL is linked statically; no separately installed SDL DLL is required. Internet and Git are needed for the first configure; build/_deps retains dependencies. Dependency licenses are in the fetched source directories. GitHub Actions builds/tests Linux and Windows and uploads the Windows executable.
+CMake FetchContent downloads pinned SDL 3.2.10, Dear ImGui 1.91.9b docking, nlohmann JSON 3.12.0, and stb_image sources from GitHub. SDL is linked statically; no separately installed SDL DLL is required. Internet and Git are needed for the first configure; build/_deps retains dependencies. Dependency licenses are in the fetched source directories. GitHub Actions builds/tests Linux and Windows and uploads the Windows executable.
 
 Linux requires GCC 12+/Clang with C++20, CMake, Git, a build tool and desktop development libraries (on Debian: libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev).
 
@@ -28,25 +28,53 @@ On a displayless Linux host add `-DSDL_UNIX_CONSOLE_BUILD=ON` at configure; this
 
 ## Editing
 
-The Level & Tools panel creates maps from 1–256 cells per dimension with either `top_down_rpg` or `platformer` genre. Select a tile ID (1–255), then left-drag on Canvas to paint or right-drag to erase to ID 0. Middle-drag pans; the wheel zooms around the cursor. Colored tiles are placeholders for future tile art. Panels can be docked by dragging their title bars. Layout persists in imgui.ini in the working directory.
+The editor creates maps from 1–256 cells per dimension with either `top_down_rpg` or `platformer` genre. The original procedural pixel-art PNG atlas is loaded from `assets/studio_tiles.png`; the palette lets you load another PNG and set its tile width/height. Select a palette tile and use Pencil to paint. The toolbar also provides Eraser, Rectangle, Line, Flood Fill, and Eyedropper. Pencil drag fills every crossed cell and is one undoable action. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. Grid visibility, Fit, and 100% reset are available in the toolbar. Middle-drag pans; the wheel zooms around the cursor. Panels can be docked by dragging their title bars. Layout persists in imgui.ini in the working directory.
 
-Enter a JSON path and click Save or Load. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading and creating a new map prompt before discarding edits. Closing the application currently does not prompt, so save before exiting. Save overwrites the named file directly; keep backups for important maps.
+Enter a JSON path in the Tileset Palette panel and click Open or Save. Relative paths resolve from the directory where the app was launched; from the checkout root try `examples/rpg.json` and `examples/platformer.json`. Loading and creating a new map prompt before discarding edits. Closing the application currently does not prompt, so save before exiting. Save overwrites the named file directly; keep backups for important maps.
 
-Layers are composited in order, and the selected layer receives edits. New maps have one Ground layer; files may contain up to 16 layers. Layer creation/reordering is not yet exposed. Errors appear in the tools panel; a failed load preserves the current level.
+The Layers panel supports creating, renaming, deleting, reordering, hiding, locking, and selecting layers. A level always retains at least one layer. Higher rows draw above lower rows; hidden layers are not rendered, and locked layers cannot be edited. Errors appear in the status bar; a failed load preserves the current level.
 
 ## Architecture
 
 - `application`: RAII SDL window/renderer and ImGui lifecycle, event/render loop.
 - `editor`: workspace, tools, input, zoom/pan and active document.
-- `rendering`: tile palette, with canvas draw commands in the editor.
+- `document`: renderer-independent grouped editing commands and bounded history.
+- `tileset`: PNG atlas slicing and RAII SDL texture ownership.
+- `rendering`: tile rendering helpers.
 - `level`: shared tile/layer model and checked operations, independent of SDL.
 - `serialization`: versioned JSON validation and filesystem I/O, independent of UI.
 - `gameplay.hpp`: reserved boundary for future genre rules; no physics or simulation yet.
 
-JSON version 1 stores `genre`, integer `width`/`height`, and `layers` containing names and row-major integer `tiles` (index y*width+x). Zero is empty. Unknown genres/versions, invalid dimensions, malformed layers, wrong tile counts and invalid IDs are rejected. Input is capped at 16 MiB. Tests cover painting/erasing, bounds, both genres, multiple layers, memory/file round-trips, example maps and malformed data. Editor smoke testing uses SDL's dummy video driver.
+JSON version 1 stores `genre`, integer `width`/`height`, and `layers` containing names, row-major integer `tiles` (index y*width+x), visibility, and lock state. Old version 1 maps without visibility/lock fields load as visible and unlocked. Zero is empty. Unknown genres/versions, invalid dimensions, malformed layers, wrong tile counts and invalid IDs are rejected. Input is capped at 16 MiB. Model tests cover paint/erase bounds, both genres, file round-trips, malformed input, sample levels, and invalid levels. Document tests cover interpolated strokes, undo/redo, redo invalidation, shape and fill tools, no-op edits, history bounds, layer edits/locks, and dirty-state restoration. The editor smoke test loads the bundled PNG through stb_image and SDL, then renders using the dummy video driver.
 
 ## Validation and limitations
 
-Use CTest as above; the executable prints the count of model checks. Windows CI is configured but must run on GitHub to establish Windows results. Manually on Windows: create each genre, paint and erase, zoom/pan, dock panels, save, restart, load and compare tiles; also load both examples. A dummy-driver smoke pass cannot establish these interactive results.
+Use CTest as above. The current automated test programs report 42 model checks and 50 document checks; CTest also starts the real SDL/ImGui editor with its bundled PNG atlas. Manually on Windows: open both examples, paint/erase, use each tool, undo/redo a stroke and layer operation, hide/lock layers, zoom/pan/fit, save and reopen. A dummy-driver smoke pass cannot establish interactive desktop input or visual quality.
 
-No undo, texture tilesets, drag interpolation, native file picker, autosave, entities, collision editing, gameplay, or packaging installer yet. Fast mouse strokes may skip cells between sampled frames. All tile IDs share four repeating display colors. Milestone 2 recommendation: undo/redo, textured tileset palette, layer tools and safe document saving before introducing gameplay.
+No native file picker, close-time unsaved prompt, atomic save, entities, collision editing, gameplay runtime, Windows ZIP package, or screenshots yet. Phase 1 has no RPG/platformer physics or playtest mode. Continue with structured world data and serialization only after Phase 1 CI and acceptance checks pass.
+
+## Studio Alpha Phase 1
+
+The current `codex/pixelforge-studio-alpha` branch adds a shared image-based editor on top of the Milestone 1 model. The original `work` branch and PR #1 remain the base. `Level` stays independent of graphics resources; a renderer-independent `Document` owns bounded undo/redo history, and the editor/tileset boundary owns PNG decoding and SDL textures.
+
+A small original pixel-art atlas is included at `assets/studio_tiles.png` under CC0 terms in `assets/LICENSE.txt`. The Tileset Palette loads PNG atlases, slices them by configurable tile width/height, displays selectable previews, and uses nearest-neighbor texture sampling with alpha. Image dimensions must be divisible by tile size and stay under 16 megapixels. The renderer reports invalid atlas indices instead of silently drawing the wrong tile.
+
+The toolbar offers Pencil, Eraser, Rectangle, Line, Flood Fill, Eyedropper, grid toggle, Fit, and 100% reset. Pencil strokes interpolate every crossed cell and form one undo entry. Ctrl+Z undoes; Ctrl+Y or Ctrl+Shift+Z redoes. No-op edits do not enter history; history retains up to 64 operations and 16 MiB of deltas/snapshots. The Layers panel creates, renames, deletes, reorders, hides, locks, and selects layers. The only remaining layer cannot be deleted. Layer visibility and locks save in version 1 JSON; old version 1 files default to visible and unlocked.
+
+The Tileset Palette provides new genre/dimension inputs plus a level path for Open and Save. Ctrl+N, Ctrl+O, and Ctrl+S are supported while the canvas has keyboard focus. Wheel zooms around the pointer, middle-drag pans, Fit centers the level, and the grid can be hidden. Layer list order matches draw order: higher rows appear over lower rows.
+
+The model test suite now covers grouped strokes and interpolation, undo/redo and branch invalidation, lines, rectangles, fill, bounded history, and undoable layer state. The SDL smoke check loads the bundled PNG, initializes ImGui/SDL rendering, verifies the atlas was accepted, and draws frames on the dummy video driver.
+
+### Architecture sketch
+
+```mermaid
+flowchart TD
+    UI[Dear ImGui editor and panels] --> DOC[Document commands and bounded history]
+    DOC --> LEVEL[Renderer-independent Level and Layers]
+    LEVEL --> JSON[Version 1 JSON serialization]
+    UI --> CANVAS[Canvas view transform and tools]
+    CANVAS --> DOC
+    CANVAS --> ATLAS[Tileset PNG decoder and atlas slicing]
+    ATLAS --> TEX[RAII-owned SDL texture]
+    TEX --> DRAW[SDL renderer / ImGui draw lists]
+```
